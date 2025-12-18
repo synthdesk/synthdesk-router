@@ -17,7 +17,9 @@ output: epistemic_snapshot
 - veto_applied (true | false)
 - audit_reference
 
+note:
+- audit_reference should be sufficient to reconstruct the exact input set and the belief basis in force (EXPECTATIONS.md / STRATA.md), without embedding action-legible semantics.
+
 no ordered fields.
 no numeric optimization surfaces.
 no action-legible labels.
-

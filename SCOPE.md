@@ -3,6 +3,10 @@
 the router exists solely to constrain downstream interpretation
 of epistemic artifacts.
 
+in-scope artifacts include:
+- governance specifications (constitution, schema, veto matrix)
+- the human-authored belief layer (EXPECTATIONS.md / STRATA.md / VIOLATIONS.md)
+
 the router will never:
 - generate advice
 - imply intent
@@ -13,4 +17,3 @@ the router will never:
 - adapt based on outcomes
 
 any system requiring those behaviors is out of scope.
-

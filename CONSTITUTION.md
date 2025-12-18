@@ -205,6 +205,27 @@ the router is frozen logic.
 
 ---
 
+#### article xi — belief layer and epistemic authority
+
+router authority must be grounded in slow, human-authored belief, not learned or inferred in code.
+
+the belief layer lives in this repository as three documents:
+- EXPECTATIONS.md (active, provisional regime beliefs)
+- STRATA.md (historical regimes & deep priors)
+- VIOLATIONS.md (append-only record when reality contradicts belief)
+
+an enforcement layer may read EXPECTATIONS.md / STRATA.md as a read-only basis for which constraint categories exist and how they are described.
+it must never:
+- edit beliefs
+- infer new beliefs
+- learn from outcomes
+- convert beliefs into triggers, thresholds, or action-shaped representations
+
+violations are logged append-only for audit.
+belief revision is human-mediated.
+
+---
+
 #### closing doctrine
 
 the router is not a brain.
@@ -212,4 +233,3 @@ it is a constitution.
 
 its success is measured not by what it enables,
 but by what it prevents from happening too early.
-
