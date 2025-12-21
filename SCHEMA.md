@@ -19,6 +19,7 @@ output: epistemic_snapshot
 
 note:
 - audit_reference should be sufficient to reconstruct the exact input set and the belief basis in force (EXPECTATIONS.md / STRATA.md), without embedding action-legible semantics.
+- listener.downtime is a hard veto input; if observed without a later listener.start, permission must remain blocked until a subsequent listener.start resolves the downtime.
 
 no ordered fields.
 no numeric optimization surfaces.

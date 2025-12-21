@@ -10,7 +10,7 @@ the router must veto downstream propagation if any of the following hold:
 | semantic violation detected          | yes  |
 | stale or invalid timestamp           | yes  |
 | aggregate state indeterminate        | yes  |
+| listener.downtime unresolved         | yes  |
 
 veto is binary.
 no overrides are permitted.
-
