@@ -1,5 +1,7 @@
 """Minimal router v1 runtime (read-only)."""
 
+raise RuntimeError("archived: non-runnable, non-authoritative")
+
 from __future__ import annotations
 
 import json

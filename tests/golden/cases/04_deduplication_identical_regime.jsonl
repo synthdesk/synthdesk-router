@@ -1,0 +1,3 @@
+{"event_id": "evt_301", "event_type": "listener.start", "timestamp": "2026-01-02T13:00:00Z", "schema_version": "1.0", "payload": {"pid": 12348}}
+{"event_id": "evt_302", "event_type": "market.regime", "timestamp": "2026-01-02T13:00:01Z", "schema_version": "1.0", "payload": {"symbol": "BTC-USD", "regime": "chop", "confidence": 0.65}}
+{"event_id": "evt_303", "event_type": "market.regime", "timestamp": "2026-01-02T13:00:02Z", "schema_version": "1.0", "payload": {"symbol": "BTC-USD", "regime": "chop", "confidence": 0.68}}

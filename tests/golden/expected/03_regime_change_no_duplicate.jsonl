@@ -1,0 +1,1 @@
+{"event_type": "router.intent", "payload": {"direction": "long", "rationale": ["regime=drift", "no violations", "listener alive"], "risk_cap": "normal", "size_pct": 0.25, "symbol": "BTC-USD"}, "source_event_id": "evt_202", "source_ts": "2026-01-02T12:00:01Z"}

@@ -1,0 +1,3 @@
+{"event_id": "evt_101", "event_type": "listener.start", "timestamp": "2026-01-02T11:00:00Z", "schema_version": "1.0", "payload": {"pid": 12346}}
+{"event_id": "evt_102", "event_type": "market.regime", "timestamp": "2026-01-02T11:00:01Z", "schema_version": "1.0", "payload": {"symbol": "BTC-USD", "regime": "breakout", "confidence": 0.82}}
+{"event_id": "evt_103", "event_type": "listener.crash", "timestamp": "2026-01-02T11:00:02Z", "schema_version": "1.0", "payload": {"exit_code": 1, "reason": "uncaught exception"}}

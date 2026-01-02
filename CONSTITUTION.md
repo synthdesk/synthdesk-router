@@ -218,6 +218,19 @@ an enforcement layer may read EXPECTATIONS.md / STRATA.md as a read-only basis f
 it must never:
 - edit beliefs
 - infer new beliefs
+
+---
+### Router Intent Exception (Phase 2+)
+
+The router MAY emit `router.intent` records as non-executing, non-advisory posture declarations.
+These intents:
+- are not trades
+- do not reference prices or indicators
+- are deterministic functions of the event spine
+- exist solely to centralize posture logic
+
+All execution, optimization, and learning remain forbidden.
+---
 - learn from outcomes
 - convert beliefs into triggers, thresholds, or action-shaped representations
 
