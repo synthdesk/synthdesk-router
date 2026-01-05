@@ -8,6 +8,14 @@ import json
 from pathlib import Path
 from typing import Dict
 
+# Canonical float handling (FPDET-1)
+try:
+    from synthdesk_spine import canonicalize_payload
+except ImportError:
+    # Fallback if spine SDK not installed (legacy mode)
+    def canonicalize_payload(payload: Dict, **kwargs) -> Dict:
+        return payload
+
 
 def emit_intent(
     spine_path: Path,
@@ -26,15 +34,19 @@ def emit_intent(
         source_event_id: Event ID that triggered this intent
         source_ts: Timestamp from source event
     """
+    # Canonicalize payload at emission boundary (FPDET-1)
+    payload = {
+        "symbol": symbol,
+        "direction": intent["direction"],
+        "size_pct": intent["size_pct"],
+        "risk_cap": intent["risk_cap"],
+        "rationale": intent["rationale"],
+    }
+    payload = canonicalize_payload(payload, skip_unknown=True)
+
     event = {
         "event_type": "router.intent",
-        "payload": {
-            "symbol": symbol,
-            "direction": intent["direction"],
-            "size_pct": intent["size_pct"],
-            "risk_cap": intent["risk_cap"],
-            "rationale": intent["rationale"],
-        },
+        "payload": payload,
         "source_event_id": source_event_id,
         "source_ts": source_ts,
     }
