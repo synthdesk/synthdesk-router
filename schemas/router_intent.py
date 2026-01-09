@@ -1,15 +1,24 @@
-"""Schema + validation for router.intent."""
+"""Schema + validation for router.intent and router.veto."""
 
 from __future__ import annotations
 
-from typing import Any
 import math
+from typing import Any
 
-DIRECTIONS = {"long", "short", "flat"}
+# Intent fields
+DIRECTIONS = {"long", "short"}  # No "flat" - flat is veto, not intent
 RISK_CAPS = {"low", "normal", "high"}
+
+# Veto reasons (frozen, exhaustive)
+VETO_REASONS = {
+    "invariant_violation",
+    "input_unavailable",
+    "regime_unresolved",
+}
 
 
 def validate_router_intent(payload: Any) -> None:
+    """Validate router.intent payload."""
     if not isinstance(payload, dict):
         raise ValueError("payload must be dict")
 
@@ -30,3 +39,17 @@ def validate_router_intent(payload: Any) -> None:
     rationale = payload.get("rationale")
     if not isinstance(rationale, list) or not all(isinstance(x, str) for x in rationale):
         raise ValueError("rationale invalid")
+
+
+def validate_router_veto(payload: Any) -> None:
+    """Validate router.veto payload."""
+    if not isinstance(payload, dict):
+        raise ValueError("payload must be dict")
+
+    symbol = payload.get("symbol")
+    if not isinstance(symbol, str) or not symbol:
+        raise ValueError("symbol invalid")
+
+    veto_reason = payload.get("veto_reason")
+    if veto_reason not in VETO_REASONS:
+        raise ValueError("invalid veto_reason")

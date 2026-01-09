@@ -5,22 +5,37 @@ Hard gates, not opinions.
 Pure functions only.
 """
 
-from typing import Dict, List, Optional, Union
+from enum import Enum
+from typing import Dict, Optional, Union
 
 from router.intent import intent_for_regime
 
 
-def apply_constraints(
+class VetoReason(str, Enum):
+    """
+    Exhaustive veto reasons. Frozen.
+
+    When router declines to emit intent, exactly one of these applies.
+    No extensibility without constitutional amendment.
+    """
+
+    INVARIANT_VIOLATION = "invariant_violation"  # system unsafe
+    INPUT_UNAVAILABLE = "input_unavailable"  # missing or invalid inputs
+    REGIME_UNRESOLVED = "regime_unresolved"  # router cannot derive exposure from regime state
+
+
+def evaluate_constraints(
     state_dict: Dict,
     symbol: str,
-) -> Dict[str, Union[str, float, List[str]]]:
+) -> Union[Dict, VetoReason]:
     """
-    Apply veto constraints and synthesize intent.
+    Evaluate constraints and return intent or veto reason.
 
-    Hard veto conditions (VETO_MATRIX.md):
-    - invariant.violation seen → force flat
-    - listener.crash recent → force flat
-    - regime unresolved → force flat
+    Returns exactly one of:
+    - Intent dict (positive exposure authority)
+    - VetoReason enum member (typed silence)
+
+    Never both. Never None. Never "flat intent".
 
     Pure function. No side effects.
 
@@ -29,45 +44,35 @@ def apply_constraints(
         symbol: Symbol identifier
 
     Returns:
-        Intent dict (direction, size_pct, risk_cap, rationale)
+        Intent dict OR VetoReason enum member
     """
     system = state_dict.get("system", {})
     symbols = state_dict.get("symbols", {})
 
     # Hard veto: invariant violation active
     if system.get("violation_active"):
-        return {
-            "direction": "flat",
-            "size_pct": 0.0,
-            "risk_cap": "low",
-            "rationale": ["invariant.violation active"],
-        }
+        return VetoReason.INVARIANT_VIOLATION
 
-    # Hard veto: listener crashed
+    # Hard veto: listener down / missing inputs
     if not system.get("listener_alive"):
-        return {
-            "direction": "flat",
-            "size_pct": 0.0,
-            "risk_cap": "low",
-            "rationale": ["listener.crash detected"],
-        }
+        return VetoReason.INPUT_UNAVAILABLE
 
-    # Hard veto: regime unknown
+    # Check regime state
     symbol_state = symbols.get(symbol, {})
     regime = symbol_state.get("regime")
-    if regime is None:
-        return {
-            "direction": "flat",
-            "size_pct": 0.0,
-            "risk_cap": "low",
-            "rationale": ["regime unresolved"],
-        }
 
-    # No veto → synthesize intent from regime
+    # Hard veto: regime unknown
+    if regime is None:
+        return VetoReason.REGIME_UNRESOLVED
+
+    # Attempt intent synthesis
     intent = intent_for_regime(regime)
-    rationale = list(intent.get("rationale", []))
-    rationale.extend(["no violations", "listener alive"])
-    intent["rationale"] = rationale
+
+    # Veto: regime does not resolve to exposure (high_vol, chop, unknown)
+    if intent is None:
+        return VetoReason.REGIME_UNRESOLVED
+
+    # No veto → return intent
     return intent
 
 

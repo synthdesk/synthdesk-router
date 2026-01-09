@@ -1,12 +1,15 @@
 """
-Intent emission - Write router.intent events to spine.
+Intent and veto emission - Write router events to spine.
 
 Constitutional exhaust port.
 """
 
 import json
 from pathlib import Path
-from typing import Dict
+from typing import TYPE_CHECKING, Dict
+
+if TYPE_CHECKING:
+    from router.constraints import VetoReason
 
 # Canonical float handling (FPDET-1)
 try:
@@ -46,6 +49,47 @@ def emit_intent(
 
     event = {
         "event_type": "router.intent",
+        "payload": payload,
+        "source_event_id": source_event_id,
+        "source_ts": source_ts,
+    }
+
+    try:
+        with spine_path.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(event, sort_keys=True) + "\n")
+            handle.flush()
+    except OSError:
+        # Silent failure - no crash propagation
+        pass
+
+
+def emit_veto(
+    spine_path: Path,
+    symbol: str,
+    veto_reason: "VetoReason",
+    source_event_id: str,
+    source_ts: str,
+) -> None:
+    """
+    Append router.veto event to spine.
+
+    Veto = typed silence. No rationale. No narrative.
+
+    Args:
+        spine_path: Path to event_spine.jsonl
+        symbol: Symbol identifier
+        veto_reason: VetoReason enum member
+        source_event_id: Event ID that triggered this veto
+        source_ts: Timestamp from source event
+    """
+    payload = {
+        "symbol": symbol,
+        "veto_reason": veto_reason.value,
+    }
+    payload = canonicalize_payload(payload, skip_unknown=True)
+
+    event = {
+        "event_type": "router.veto",
         "payload": payload,
         "source_event_id": source_event_id,
         "source_ts": source_ts,

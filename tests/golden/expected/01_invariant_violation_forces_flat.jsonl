@@ -1,2 +1,2 @@
-{"event_type": "router.intent", "payload": {"direction": "long", "rationale": ["regime=drift", "no violations", "listener alive"], "risk_cap": "normal", "size_pct": 0.25, "symbol": "BTC-USD"}, "source_event_id": "evt_002", "source_ts": "2026-01-02T10:00:01Z"}
-{"event_type": "router.intent", "payload": {"direction": "flat", "rationale": ["invariant.violation active"], "risk_cap": "low", "size_pct": 0.0, "symbol": "BTC-USD"}, "source_event_id": "evt_003", "source_ts": "2026-01-02T10:00:02Z"}
+{"event_type": "router.intent", "payload": {"direction": "long", "rationale": ["regime=drift"], "risk_cap": "normal", "size_pct": 0.25, "symbol": "BTC-USD"}, "source_event_id": "evt_002", "source_ts": "2026-01-02T10:00:01Z"}
+{"event_type": "router.veto", "payload": {"symbol": "BTC-USD", "veto_reason": "invariant_violation"}, "source_event_id": "evt_003", "source_ts": "2026-01-02T10:00:02Z"}

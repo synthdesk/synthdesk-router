@@ -104,6 +104,8 @@ class RouterState:
         """
         Record last emitted intent for symbol (for dedup).
 
+        Clears last veto (XOR: intent or veto, not both).
+
         Args:
             symbol: Symbol identifier
             intent: Intent dict
@@ -111,6 +113,34 @@ class RouterState:
         if symbol not in self.symbols:
             self.symbols[symbol] = {}
         self.symbols[symbol]["last_intent"] = intent
+        self.symbols[symbol]["last_veto_reason"] = None
+
+    def get_last_veto_reason(self, symbol: str) -> Optional[str]:
+        """
+        Get last emitted veto reason for symbol (for dedup).
+
+        Args:
+            symbol: Symbol identifier
+
+        Returns:
+            Last veto reason string or None
+        """
+        return self.symbols.get(symbol, {}).get("last_veto_reason")
+
+    def set_last_veto_reason(self, symbol: str, veto_reason: str) -> None:
+        """
+        Record last emitted veto reason for symbol (for dedup).
+
+        Clears last intent (XOR: intent or veto, not both).
+
+        Args:
+            symbol: Symbol identifier
+            veto_reason: VetoReason.value string
+        """
+        if symbol not in self.symbols:
+            self.symbols[symbol] = {}
+        self.symbols[symbol]["last_veto_reason"] = veto_reason
+        self.symbols[symbol]["last_intent"] = None
 
     def is_listener_alive(self) -> bool:
         """Check if listener is alive."""

@@ -31,7 +31,7 @@ router/
 ├── state.py          # Minimal, explicit state (reconstructible)
 ├── constraints.py    # Veto logic (pure functions)
 ├── intent.py         # Intent synthesis (frozen mapping)
-└── emit.py           # router.intent emission
+└── emit.py           # router.intent/router.veto emission
 ```
 
 ---
@@ -48,7 +48,7 @@ router/
 **After:**
 - `router/main.py` - Unified runtime
 - Consumes: `listener.start`, `listener.crash`, `invariant.violation`, `market.regime`, `market.regime_change`
-- Emits: `router.intent` (payload + `source_event_id`/`source_ts`)
+- Emits: `router.intent` and `router.veto` (payload + `source_event_id`/`source_ts`)
 - Works in both daemon and replay modes
 
 ### Event Contract Change
@@ -61,6 +61,7 @@ router.permission: allow  (stdout only, one-shot)
 **New output:**
 ```jsonl
 {"event_type": "router.intent", "payload": {"symbol": "BTC-USD", "direction": "long", "size_pct": 0.25, "risk_cap": "normal", "rationale": ["regime=drift"]}, "source_event_id": "...", "source_ts": "..."}
+{"event_type": "router.veto", "payload": {"symbol": "BTC-USD", "veto_reason": "invariant_violation"}, "source_event_id": "...", "source_ts": "..."}
 ```
 
 ---
@@ -71,19 +72,20 @@ router.permission: allow  (stdout only, one-shot)
 
 | Regime | Direction | Size % | Risk Cap |
 |--------|-----------|--------|----------|
-| `high_vol` | flat | 0.0 | low |
-| `chop` | flat | 0.0 | low |
 | `drift` | long | 0.25 | normal |
 | `breakout` | long | 0.25 | high |
-| unknown | flat | 0.0 | low |
+
+Regimes that produce veto (`veto_reason=regime_unresolved`): `high_vol`, `chop`, unknown.
 
 **Changes to this mapping require constitutional amendment.**
 
 ### Hard Veto Conditions (VETO_MATRIX.md)
 
-1. `invariant.violation` active → force flat
-2. `listener.crash` detected → force flat
-3. Regime unresolved → force flat
+1. `invariant.violation` active → emit `router.veto` (`invariant_violation`)
+2. `listener.crash` detected → emit `router.veto` (`input_unavailable`)
+3. Regime unresolved → emit `router.veto` (`regime_unresolved`)
+
+`regime_unresolved` means the router cannot derive exposure from the current regime state.
 
 **Veto is binary. No overrides.**
 
@@ -93,20 +95,20 @@ router.permission: allow  (stdout only, one-shot)
 
 ### Test Coverage
 
-✅ **01: Invariant Violation Forces Flat**
+✅ **01: Invariant Violation Emits Veto**
 - Regime = drift → long intent
-- Invariant violation → overrides to flat
+- Invariant violation → emits `router.veto` (`invariant_violation`)
 
-✅ **02: Listener Crash Forces Flat**
+✅ **02: Listener Crash Emits Veto**
 - Regime = breakout → long intent
-- Listener crash → overrides to flat
+- Listener crash → emits `router.veto` (`input_unavailable`)
 
 ✅ **03: Regime Change No Duplicate**
 - Regime = drift → long intent
 - Regime change (drift → drift) → no new emission (dedup)
 
 ✅ **04: Deduplication Identical Regime**
-- Regime = chop → flat intent
+- Regime = chop → `router.veto` (`regime_unresolved`)
 - Same regime again → no new emission (dedup)
 
 ### Determinism Enforcement
@@ -130,7 +132,8 @@ Router keeps minimal ephemeral state:
     "BTC-USD": {
       "regime": "drift",
       "last_regime_ts": "...",
-      "last_intent": {...}  # for dedup
+      "last_intent": {...},  # for dedup
+      "last_veto_reason": "..."  # for dedup
     }
   },
   "system": {
@@ -174,7 +177,7 @@ Given identical input spine → produces byte-identical output:
 - `router/state.py` - State management (103 lines)
 - `router/constraints.py` - Veto logic (79 lines)
 - `router/intent.py` - Intent synthesis (58 lines)
-- `router/emit.py` - Event emission (41 lines)
+- `router/emit.py` - Event emission (intent + veto)
 
 ### Tests & Documentation
 - `README.md` - Frozen v0.1 specification (436 lines)
@@ -223,7 +226,7 @@ PYTHONPATH=. python3 -m router.main
 
 ### Replay mode (determinism testing)
 ```bash
-PYTHONPATH=. python3 -m router.main --replay input_spine.jsonl output_intents.jsonl
+PYTHONPATH=. python3 -m router.main --replay input_spine.jsonl router_output.jsonl
 ```
 
 ### Run golden gates
@@ -271,9 +274,17 @@ The foundation is locked.
 - Lockable ✅
 
 **Downstream opportunities** (not router concerns):
-- Agency consumes `router.intent` events
+- Agency consumes `router.intent`/`router.veto` events
 - Execution layer (if/when needed) reads intent
 - Dashboards visualize intent provenance
 - Auditors replay for institutional compliance
 
 **Router authority is now constitutionally grounded and deterministically verifiable.**
+
+---
+
+## Authoritative Status
+
+**This document is authoritative. Changes require constitutional amendment.**
+
+Sealed: 2026-01-09

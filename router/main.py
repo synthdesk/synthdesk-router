@@ -15,8 +15,8 @@ import argparse
 import sys
 from pathlib import Path
 
-from router.constraints import apply_constraints, should_emit_intent
-from router.emit import emit_intent
+from router.constraints import VetoReason, evaluate_constraints, should_emit_intent
+from router.emit import emit_intent, emit_veto
 from router.spine_reader import SpineReader
 from router.state import RouterState
 
@@ -74,32 +74,43 @@ def run_runtime(spine_path: Path, poll_interval: float = DEFAULT_POLL_INTERVAL) 
         if event_type in ("listener.start", "listener.crash", "invariant.violation"):
             symbols_to_check.update(state.symbols.keys())
 
-        # Synthesize and emit intents
+        # Synthesize and emit (XOR: intent or veto, never both)
         emit_allowed = isinstance(event_id, str) and isinstance(timestamp, str)
         for symbol in symbols_to_check:
             if not emit_allowed:
                 continue
-            # Apply constraints (veto logic + intent synthesis)
+
+            # Evaluate constraints → intent or veto reason
             state_dict = {
                 "system": state.system,
                 "symbols": state.symbols,
             }
-            current_intent = apply_constraints(state_dict, symbol)
+            result = evaluate_constraints(state_dict, symbol)
 
-            # Check if intent changed (deduplication)
-            last_intent = state.get_last_intent(symbol)
-            if should_emit_intent(current_intent, last_intent):
-                # Emit router.intent to spine
-                emit_intent(
-                    spine_path=spine_path,
-                    symbol=symbol,
-                    intent=current_intent,
-                    source_event_id=event_id,
-                    source_ts=timestamp,
-                )
-
-                # Update last intent for dedup
-                state.set_last_intent(symbol, current_intent)
+            if isinstance(result, VetoReason):
+                # Veto path: typed silence
+                last_veto = state.get_last_veto_reason(symbol)
+                if result.value != last_veto:
+                    emit_veto(
+                        spine_path=spine_path,
+                        symbol=symbol,
+                        veto_reason=result,
+                        source_event_id=event_id,
+                        source_ts=timestamp,
+                    )
+                    state.set_last_veto_reason(symbol, result.value)
+            else:
+                # Intent path: positive exposure authority
+                last_intent = state.get_last_intent(symbol)
+                if should_emit_intent(result, last_intent):
+                    emit_intent(
+                        spine_path=spine_path,
+                        symbol=symbol,
+                        intent=result,
+                        source_event_id=event_id,
+                        source_ts=timestamp,
+                    )
+                    state.set_last_intent(symbol, result)
 
 
 def run_replay(input_spine: Path, output_spine: Path) -> None:
@@ -142,32 +153,43 @@ def run_replay(input_spine: Path, output_spine: Path) -> None:
         if event_type in ("listener.start", "listener.crash", "invariant.violation"):
             symbols_to_check.update(state.symbols.keys())
 
-        # Synthesize and emit intents
+        # Synthesize and emit (XOR: intent or veto, never both)
         emit_allowed = isinstance(event_id, str) and isinstance(timestamp, str)
         for symbol in symbols_to_check:
             if not emit_allowed:
                 continue
-            # Apply constraints (veto logic + intent synthesis)
+
+            # Evaluate constraints → intent or veto reason
             state_dict = {
                 "system": state.system,
                 "symbols": state.symbols,
             }
-            current_intent = apply_constraints(state_dict, symbol)
+            result = evaluate_constraints(state_dict, symbol)
 
-            # Check if intent changed (deduplication)
-            last_intent = state.get_last_intent(symbol)
-            if should_emit_intent(current_intent, last_intent):
-                # Emit router.intent to output file
-                emit_intent(
-                    spine_path=output_spine,
-                    symbol=symbol,
-                    intent=current_intent,
-                    source_event_id=event_id,
-                    source_ts=timestamp,
-                )
-
-                # Update last intent for dedup
-                state.set_last_intent(symbol, current_intent)
+            if isinstance(result, VetoReason):
+                # Veto path: typed silence
+                last_veto = state.get_last_veto_reason(symbol)
+                if result.value != last_veto:
+                    emit_veto(
+                        spine_path=output_spine,
+                        symbol=symbol,
+                        veto_reason=result,
+                        source_event_id=event_id,
+                        source_ts=timestamp,
+                    )
+                    state.set_last_veto_reason(symbol, result.value)
+            else:
+                # Intent path: positive exposure authority
+                last_intent = state.get_last_intent(symbol)
+                if should_emit_intent(result, last_intent):
+                    emit_intent(
+                        spine_path=output_spine,
+                        symbol=symbol,
+                        intent=result,
+                        source_event_id=event_id,
+                        source_ts=timestamp,
+                    )
+                    state.set_last_intent(symbol, result)
 
     print("replay complete", file=sys.stderr, flush=True)
 

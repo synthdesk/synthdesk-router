@@ -13,7 +13,7 @@ The router is a **deterministic intent synthesizer** that:
 1. Consumes facts from the event spine
 2. Applies hard-veto constraints
 3. Synthesizes posture intent (not execution orders)
-4. Emits `router.intent` events
+4. Emits `router.intent` or `router.veto` events
 
 The router is **not smart**. It is **authoritative**.
 
@@ -40,10 +40,10 @@ The router is **not smart**. It is **authoritative**.
 router/
 ├── main.py              # Long-running loop (single entrypoint)
 ├── spine_reader.py      # Reads append-only event spine
-├── state.py             # Router-local state (regimes, violations, last_intent)
+├── state.py             # Router-local state (regimes, violations, last_intent, last_veto_reason)
 ├── constraints.py       # Veto logic (pure functions)
 ├── intent.py            # Intent synthesis (pure, deterministic)
-└── emit.py              # Writes router.intent events to spine
+└── emit.py              # Writes router.intent/router.veto events to spine
 ```
 
 Single entrypoint. Boring. Inspectable.
@@ -57,10 +57,10 @@ Single entrypoint. Boring. Inspectable.
 The router consumes exactly these event types:
 
 1. `listener.start` → system alive signal
-2. `listener.crash` → system failure, force flat
-3. `invariant.violation` → hard veto, force flat
+2. `listener.crash` → system failure, input unavailable → veto
+3. `invariant.violation` → hard veto → veto
 4. `market.regime` → regime classification update
-5. `market.regime_change` → regime transition (preserves rationale)
+5. `market.regime_change` → regime transition
 
 **Nothing else.**
 
@@ -71,7 +71,7 @@ The router consumes exactly these event types:
 
 ### Output Events (to spine only)
 
-The router emits exactly one event type:
+The router emits two event types:
 
 **`router.intent`**
 
@@ -81,13 +81,11 @@ Event schema:
   "event_type": "router.intent",
   "payload": {
     "symbol": "BTC-USD",
-    "direction": "long | short | flat",
-    "size_pct": 0.0 | 0.25,
+    "direction": "long | short",
+    "size_pct": 0.25,
     "risk_cap": "low | normal | high",
     "rationale": [
-      "regime=drift",
-      "no violations",
-      "listener alive"
+      "regime=drift"
     ]
   },
   "source_event_id": "evt_...",
@@ -95,10 +93,26 @@ Event schema:
 }
 ```
 
+**`router.veto`**
+
+Event schema:
+```json
+{
+  "event_type": "router.veto",
+  "payload": {
+    "symbol": "BTC-USD",
+    "veto_reason": "invariant_violation | input_unavailable | regime_unresolved"
+  },
+  "source_event_id": "evt_...",
+  "source_ts": "2026-01-02T10:00:01Z"
+}
+```
+
+`regime_unresolved` means the router cannot derive exposure from the current regime state.
+
 **Emission rules:**
-- Only emit on **change** (deduplicate by symbol)
-- Do not spam identical intents
-- Include full provenance in rationale
+- Intent: emit only on **change** (deduplicate by symbol); rationale explains exposure
+- Veto: emit only on **reason change** (deduplicate by symbol); no rationale
 - Preserve triggering provenance via `source_event_id` and `source_ts`
 
 ---
@@ -114,6 +128,7 @@ state = {
       "regime": "chop",              # from market.regime
       "last_regime_ts": "...",       # timestamp
       "last_intent": {...},          # last emitted intent (dedup)
+      "last_veto_reason": "...",     # last emitted veto reason (dedup)
     },
     ...
   },
@@ -140,53 +155,40 @@ Constraints are **hard gates**, not opinions.
 
 ### Veto Conditions (VETO_MATRIX.md)
 
-| Condition | Action |
-|-----------|--------|
-| `invariant.violation` seen | Force flat (0%, low risk) |
-| `listener.crash` recent | Force flat |
-| Regime unresolved | Force flat |
-| Stale or invalid timestamp | Force flat |
-| Missing required modality | Force flat |
+| Condition | Veto reason |
+|-----------|-------------|
+| `invariant.violation` seen | `invariant_violation` |
+| `listener.crash` recent | `input_unavailable` |
+| Regime unresolved or no-exposure regime | `regime_unresolved` |
+| Stale or invalid timestamp | `input_unavailable` |
+| Missing required modality | `input_unavailable` |
 
 **Veto is binary. No overrides permitted.**
 
 ### Constraint Function (Pure)
 
 ```python
-def apply_constraints(state: dict, symbol: str) -> dict:
-    """Returns intent or veto (force flat). Pure function."""
+def evaluate_constraints(state: dict, symbol: str) -> dict | VetoReason:
+    """Returns intent or veto reason. Pure function."""
 
     # Hard veto: invariant violation active
     if state["system"]["violation_active"]:
-        return {
-            "direction": "flat",
-            "size_pct": 0.0,
-            "risk_cap": "low",
-            "rationale": ["invariant.violation active"],
-        }
+        return VetoReason.INVARIANT_VIOLATION
 
-    # Hard veto: listener crashed
+    # Hard veto: listener down / missing inputs
     if not state["system"]["listener_alive"]:
-        return {
-            "direction": "flat",
-            "size_pct": 0.0,
-            "risk_cap": "low",
-            "rationale": ["listener.crash detected"],
-        }
+        return VetoReason.INPUT_UNAVAILABLE
 
     # Hard veto: regime unknown
     regime = state["symbols"].get(symbol, {}).get("regime")
     if regime is None:
-        return {
-            "direction": "flat",
-            "size_pct": 0.0,
-            "risk_cap": "low",
-            "rationale": ["regime unresolved"],
-        }
+        return VetoReason.REGIME_UNRESOLVED
 
-    # No veto → synthesize intent from regime
+    # Attempt intent synthesis
     intent = intent_for_regime(regime)
-    intent["rationale"] += ["no violations", "listener alive"]
+    if intent is None:
+        return VetoReason.REGIME_UNRESOLVED
+
     return intent
 ```
 
@@ -201,44 +203,24 @@ Intent answers one question:
 ### Frozen Regime → Intent Mapping (v0.1)
 
 ```python
-def intent_for_regime(regime: str) -> dict:
+INTENT_REGIMES = {
+    "drift": {
+        "direction": "long",
+        "size_pct": 0.25,
+        "risk_cap": "normal",
+        "rationale": ["regime=drift"],
+    },
+    "breakout": {
+        "direction": "long",
+        "size_pct": 0.25,
+        "risk_cap": "high",
+        "rationale": ["regime=breakout"],
+    },
+}
+
+def intent_for_regime(regime: str) -> dict | None:
     """Deterministic regime → intent mapping. Frozen."""
-    mapping = {
-        "high_vol": {
-            "direction": "flat",
-            "size_pct": 0.0,
-            "risk_cap": "low",
-            "rationale": ["regime=high_vol"],
-        },
-        "chop": {
-            "direction": "flat",
-            "size_pct": 0.0,
-            "risk_cap": "low",
-            "rationale": ["regime=chop"],
-        },
-        "drift": {
-            "direction": "long",
-            "size_pct": 0.25,
-            "risk_cap": "normal",
-            "rationale": ["regime=drift"],
-        },
-        "breakout": {
-            "direction": "long",
-            "size_pct": 0.25,
-            "risk_cap": "high",
-            "rationale": ["regime=breakout"],
-        },
-    }
-
-    # Unknown regime → flat (defensive default)
-    intent = mapping.get(regime, {
-        "direction": "flat",
-        "size_pct": 0.0,
-        "risk_cap": "low",
-        "rationale": [f"regime={regime} (unmapped)"],
-    })
-
-    return intent
+    return INTENT_REGIMES.get(regime)  # None => veto (high_vol, chop, unknown)
 ```
 
 **This mapping is intentionally dumb.**
@@ -317,7 +299,7 @@ Router authority is grounded in human-authored belief:
 
 ## Acceptance Criteria (Golden Corpus)
 
-### Test 1: Invariant Violation Forces Flat
+### Test 1: Invariant Violation Emits Veto
 **Input:**
 ```jsonl
 {"event_type": "market.regime", "payload": {"symbol": "BTC-USD", "regime": "drift"}, ...}
@@ -327,10 +309,10 @@ Router authority is grounded in human-authored belief:
 **Expected output:**
 ```jsonl
 {"event_type": "router.intent", "payload": {"symbol": "BTC-USD", "direction": "long", "size_pct": 0.25, ...}, "source_event_id": "...", "source_ts": "..."}
-{"event_type": "router.intent", "payload": {"symbol": "BTC-USD", "direction": "flat", "size_pct": 0.0, "rationale": ["invariant.violation active"]}, "source_event_id": "...", "source_ts": "..."}
+{"event_type": "router.veto", "payload": {"symbol": "BTC-USD", "veto_reason": "invariant_violation"}, "source_event_id": "...", "source_ts": "..."}
 ```
 
-### Test 2: Listener Crash Forces Flat
+### Test 2: Listener Crash Emits Veto
 **Input:**
 ```jsonl
 {"event_type": "listener.start", ...}
@@ -341,7 +323,7 @@ Router authority is grounded in human-authored belief:
 **Expected output:**
 ```jsonl
 {"event_type": "router.intent", "payload": {"symbol": "BTC-USD", "direction": "long", "size_pct": 0.25, ...}, "source_event_id": "...", "source_ts": "..."}
-{"event_type": "router.intent", "payload": {"symbol": "BTC-USD", "direction": "flat", "size_pct": 0.0, "rationale": ["listener.crash detected"]}, "source_event_id": "...", "source_ts": "..."}
+{"event_type": "router.veto", "payload": {"symbol": "BTC-USD", "veto_reason": "input_unavailable"}, "source_event_id": "...", "source_ts": "..."}
 ```
 
 ### Test 3: Regime Change Preserves Intent
@@ -357,7 +339,7 @@ Router authority is grounded in human-authored belief:
 ```
 (No second emission - intent unchanged)
 
-### Test 4: Deduplication Works
+### Test 4: Deduplication Works (Veto)
 **Input:**
 ```jsonl
 {"event_type": "market.regime", "payload": {"symbol": "BTC-USD", "regime": "chop"}, ...}
@@ -366,7 +348,7 @@ Router authority is grounded in human-authored belief:
 
 **Expected output:**
 ```jsonl
-{"event_type": "router.intent", "payload": {"symbol": "BTC-USD", "direction": "flat", ...}, "source_event_id": "...", "source_ts": "..."}
+{"event_type": "router.veto", "payload": {"symbol": "BTC-USD", "veto_reason": "regime_unresolved"}, "source_event_id": "...", "source_ts": "..."}
 ```
 (Only one emission)
 
@@ -399,7 +381,7 @@ pip install -e /Users/lucas/dev/synthdesk/packages/router
 python -m router.main
 
 # Replay mode (determinism testing)
-python -m router.main --replay event_spine.jsonl intent_output.jsonl
+python -m router.main --replay event_spine.jsonl router_output.jsonl
 ```
 
 ---

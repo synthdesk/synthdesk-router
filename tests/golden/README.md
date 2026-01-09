@@ -1,32 +1,32 @@
 # Router v0.1 Golden Corpus
 
-**Purpose:** Determinism enforcement for router intent synthesis
+**Purpose:** Determinism enforcement for router output synthesis (intent + veto)
 
 ## Test Cases
 
-### 01: Invariant Violation Forces Flat
+### 01: Invariant Violation Emits Veto
 **Input:** `cases/01_invariant_violation_forces_flat.jsonl`
 **Expected:** `expected/01_invariant_violation_forces_flat.jsonl`
 
 **Scenario:**
 1. Listener starts
 2. Market regime = drift → emits `router.intent` (long, 25%, normal)
-3. Invariant violation occurs → overrides to flat (0%, low)
+3. Invariant violation occurs → emits `router.veto` (invariant_violation)
 
 **Invariant:** Hard veto takes precedence over regime intent
 
 ---
 
-### 02: Listener Crash Forces Flat
+### 02: Listener Crash Emits Veto
 **Input:** `cases/02_listener_crash_forces_flat.jsonl`
 **Expected:** `expected/02_listener_crash_forces_flat.jsonl`
 
 **Scenario:**
 1. Listener starts
 2. Market regime = breakout → emits `router.intent` (long, 25%, high)
-3. Listener crashes → overrides to flat (0%, low)
+3. Listener crashes → emits `router.veto` (input_unavailable)
 
-**Invariant:** System failure forces defensive posture
+**Invariant:** System failure emits veto (input_unavailable)
 
 ---
 
@@ -43,16 +43,16 @@
 
 ---
 
-### 04: Deduplication Works for Identical Regime
+### 04: Deduplication Works for Identical Regime (Veto)
 **Input:** `cases/04_deduplication_identical_regime.jsonl`
 **Expected:** `expected/04_deduplication_identical_regime.jsonl`
 
 **Scenario:**
 1. Listener starts
-2. Market regime = chop → emits `router.intent` (flat, 0%, low)
-3. Market regime = chop (again) → **no new emission** (intent unchanged)
+2. Market regime = chop → emits `router.veto` (regime_unresolved)
+3. Market regime = chop (again) → **no new emission** (veto reason unchanged)
 
-**Invariant:** Identical regime classifications don't spam identical intents
+**Invariant:** Identical regime classifications don't spam identical vetoes
 
 ---
 
