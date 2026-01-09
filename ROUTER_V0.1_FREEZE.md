@@ -4,6 +4,9 @@
 **Status:** ✅ Formally lockable
 **Determinism:** ✅ Golden gates passing
 
+This document is authoritative.
+Changes require constitutional amendment.
+
 ---
 
 ## What Was Built
