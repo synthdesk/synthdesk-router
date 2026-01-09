@@ -5,7 +5,12 @@ Minimal, explicit state derived only from events.
 Reconstructible via replay.
 """
 
-from typing import Dict, Optional
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Dict, Optional
+
+if TYPE_CHECKING:
+    from router.allocator import AllocationResult
 
 
 class RouterState:
@@ -102,9 +107,9 @@ class RouterState:
 
     def set_last_intent(self, symbol: str, intent: Dict) -> None:
         """
-        Record last emitted intent for symbol (for dedup).
+        Record last emitted intent for symbol (for dedup, legacy).
 
-        Clears last veto (XOR: intent or veto, not both).
+        Clears last veto and allocation (XOR: intent or veto, not both).
 
         Args:
             symbol: Symbol identifier
@@ -113,6 +118,7 @@ class RouterState:
         if symbol not in self.symbols:
             self.symbols[symbol] = {}
         self.symbols[symbol]["last_intent"] = intent
+        self.symbols[symbol]["last_allocation"] = None  # Clear v0.2 field
         self.symbols[symbol]["last_veto_reason"] = None
 
     def get_last_veto_reason(self, symbol: str) -> Optional[str]:
@@ -131,7 +137,7 @@ class RouterState:
         """
         Record last emitted veto reason for symbol (for dedup).
 
-        Clears last intent (XOR: intent or veto, not both).
+        Clears last intent/allocation (XOR: intent or veto, not both).
 
         Args:
             symbol: Symbol identifier
@@ -141,6 +147,35 @@ class RouterState:
             self.symbols[symbol] = {}
         self.symbols[symbol]["last_veto_reason"] = veto_reason
         self.symbols[symbol]["last_intent"] = None
+        self.symbols[symbol]["last_allocation"] = None
+
+    def get_last_allocation(self, symbol: str) -> Optional["AllocationResult"]:
+        """
+        Get last emitted allocation for symbol (for dedup, v0.2).
+
+        Args:
+            symbol: Symbol identifier
+
+        Returns:
+            Last AllocationResult or None
+        """
+        return self.symbols.get(symbol, {}).get("last_allocation")
+
+    def set_last_allocation(self, symbol: str, allocation: "AllocationResult") -> None:
+        """
+        Record last emitted allocation for symbol (for dedup, v0.2).
+
+        Clears last veto (XOR: intent or veto, not both).
+
+        Args:
+            symbol: Symbol identifier
+            allocation: AllocationResult from allocator
+        """
+        if symbol not in self.symbols:
+            self.symbols[symbol] = {}
+        self.symbols[symbol]["last_allocation"] = allocation
+        self.symbols[symbol]["last_intent"] = None  # Clear legacy field
+        self.symbols[symbol]["last_veto_reason"] = None
 
     def is_listener_alive(self) -> bool:
         """Check if listener is alive."""

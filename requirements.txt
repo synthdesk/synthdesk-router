@@ -1,0 +1,3 @@
+# Router package dependencies
+# Required for certificate signature verification
+cryptography>=41.0.0
