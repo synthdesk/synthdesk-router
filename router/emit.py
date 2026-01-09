@@ -16,6 +16,7 @@ if TYPE_CHECKING:
     from router.allocator import AllocationResult
     from router.constraints import VetoReason
 
+from router.envelope import make_mock_envelope
 from schemas.router_intent import validate_router_intent
 
 logger = logging.getLogger(__name__)
@@ -110,6 +111,16 @@ def emit_intent(
         "risk_cap": allocation.risk_cap.value,
         "rationale": allocation.rationale,
     }
+
+    # Attach envelope (deterministic uncertainty bands)
+    envelope = make_mock_envelope(
+        intent_side=allocation.direction.value,
+        confidence=allocation.entropy_factor,
+        vetoed=False,
+        size=allocation.size_pct_q / allocation.size_pct_scale,
+    )
+    payload["envelope"] = envelope.to_dict()
+
     payload = canonicalize_payload(payload, skip_unknown=True)
 
     # EMISSION BOUNDARY: Validate before write
@@ -165,6 +176,16 @@ def emit_veto(
         "symbol": symbol,
         "veto_reason": veto_reason.value,
     }
+
+    # Attach envelope (vetoed state collapses to zero)
+    envelope = make_mock_envelope(
+        intent_side="FLAT",
+        confidence=0.0,
+        vetoed=True,
+        size=0.0,
+    )
+    payload["envelope"] = envelope.to_dict()
+
     payload = canonicalize_payload(payload, skip_unknown=True)
 
     event = {
