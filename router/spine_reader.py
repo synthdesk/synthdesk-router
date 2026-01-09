@@ -32,34 +32,43 @@ class SpineReader:
 
     def _scan_existing(self) -> int:
         """
-        Scan existing spine from start, update offset.
+        Scan existing spine from start, return final offset.
 
         Returns:
-            Final offset after scanning
+            Final offset after scanning (end of file)
+
+        Note:
+            Uses readline() loop instead of iteration because
+            `for line in handle` disables tell() in Python.
         """
-        offset = 0
         try:
             with self.spine_path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    offset = handle.tell()
+                # Seek to end to get file size as offset
+                handle.seek(0, 2)  # SEEK_END
+                return handle.tell()
         except OSError:
             return 0
-        return offset
 
     def _refresh_offset(self) -> None:
         """
         Detect file rotation and rescan if needed.
 
         Updates self.offset and self.inode.
+
+        Note: Only resets offset on actual file rotation (inode change
+        or size decrease), NOT on first call. First call just records inode.
         """
         try:
             stat = self.spine_path.stat()
         except OSError:
             return
 
-        # File rotation detected (inode changed or size decreased)
-        if self.inode is None or stat.st_ino != self.inode or stat.st_size < self.offset:
-            self.offset = self._scan_existing()
+        if self.inode is None:
+            # First call: just record inode, keep offset as-is
+            self.inode = stat.st_ino
+        elif stat.st_ino != self.inode or stat.st_size < self.offset:
+            # File rotation detected: reset to start
+            self.offset = 0
             self.inode = stat.st_ino
 
     def tail(self, skip_existing: bool = False) -> Iterator[Dict]:
@@ -90,7 +99,12 @@ class SpineReader:
             try:
                 with self.spine_path.open("r", encoding="utf-8") as handle:
                     handle.seek(self.offset)
-                    for line in handle:
+                    while True:
+                        line = handle.readline()
+                        if not line:
+                            # EOF reached, update offset and break
+                            self.offset = handle.tell()
+                            break
                         self.offset = handle.tell()
                         line = line.strip()
                         if not line:
