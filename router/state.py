@@ -24,8 +24,16 @@ class RouterState:
     - Never written back upstream
     """
 
-    def __init__(self):
-        """Initialize empty router state."""
+    def __init__(self, authority_epoch_ts: Optional[str] = None):
+        """
+        Initialize empty router state.
+
+        Args:
+            authority_epoch_ts: ISO timestamp marking authority epoch start.
+                If provided, invariant violations before this timestamp are
+                ignored (they belong to a prior epoch and cannot demote the
+                current authority binding). If None, all violations count.
+        """
         self.symbols: Dict[str, Dict] = {}
         self.system = {
             "listener_alive": False,
@@ -33,6 +41,7 @@ class RouterState:
             "violation_active": False,
             "last_violation_ts": None,
         }
+        self._authority_epoch_ts = authority_epoch_ts
 
     def update_from_event(self, event: Dict) -> None:
         """
@@ -57,10 +66,13 @@ class RouterState:
             self.system["listener_alive"] = False
             self.system["last_listener_event_ts"] = timestamp
 
-        # Invariant violations
+        # Invariant violations (epoch-scoped)
         elif event_type == "invariant.violation":
-            self.system["violation_active"] = True
-            self.system["last_violation_ts"] = timestamp
+            # Only count violations within the current authority epoch.
+            # Pre-epoch violations cannot demote a later authority binding.
+            if self._authority_epoch_ts is None or timestamp >= self._authority_epoch_ts:
+                self.system["violation_active"] = True
+                self.system["last_violation_ts"] = timestamp
 
         # Market regime updates
         elif event_type == "market.regime":

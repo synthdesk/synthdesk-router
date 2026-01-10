@@ -261,7 +261,9 @@ def run_runtime(
         authority_state: Bound authority state
         demotions_path: Path for durable demotion recording
     """
-    router_state = RouterState()
+    # Pass promoted_at as authority epoch: violations before this timestamp
+    # cannot demote the current authority binding (they belong to a prior epoch)
+    router_state = RouterState(authority_epoch_ts=authority_state.promoted_at)
     reader = SpineReader(spine_path, poll_interval)
     gated_router = AuthorityGatedRouter(authority_state, router_state, spine_path, demotions_path)
 
@@ -369,7 +371,9 @@ def run_replay(
         output_spine: Output router_intent.jsonl
         authority_state: Bound authority state
     """
-    router_state = RouterState()
+    # Pass promoted_at as authority epoch: violations before this timestamp
+    # cannot demote the current authority binding (they belong to a prior epoch)
+    router_state = RouterState(authority_epoch_ts=authority_state.promoted_at)
     reader = SpineReader(input_spine)
     # In replay mode, demotion events go to output_spine
     gated_router = AuthorityGatedRouter(authority_state, router_state, output_spine)

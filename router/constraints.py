@@ -29,12 +29,24 @@ class VetoReason(str, Enum):
 
     When router declines to emit intent, exactly one of these applies.
     No extensibility without constitutional amendment.
+
+    Semantic categories:
+    - System vetoes: infrastructure issues, always "honest" by construction
+    - Edge-absent vetoes: no market signal detected, abstention (not chaos claim)
+    - Danger vetoes: market conditions unsafe, should correlate with chaos
     """
 
+    # System vetoes (infrastructure)
     INVARIANT_VIOLATION = "invariant_violation"  # system unsafe
     INPUT_UNAVAILABLE = "input_unavailable"  # missing or invalid inputs
-    REGIME_UNRESOLVED = "regime_unresolved"  # router cannot derive exposure from regime state
     AUTHORITY_GATE = "authority_gate"  # v0.1 blocks non-flat posture
+
+    # Edge-absent vetoes (abstention, not chaos claim)
+    REGIME_UNRESOLVED = "regime_unresolved"  # router cannot derive exposure from regime state
+    NO_EDGE = "no_edge"  # chop regime: no directional signal detected
+
+    # Danger vetoes (should correlate with chaos)
+    REGIME_VOLATILE = "regime_volatile"  # high_vol regime: excess risk
 
 
 # Map allocator veto reasons to constitutional VetoReason
@@ -42,8 +54,8 @@ _VETO_REASON_MAP = {
     "input_unavailable": VetoReason.INPUT_UNAVAILABLE,
     "violation_active": VetoReason.INVARIANT_VIOLATION,
     "regime_unresolved": VetoReason.REGIME_UNRESOLVED,
-    "regime_chop": VetoReason.REGIME_UNRESOLVED,
-    "regime_high_vol": VetoReason.REGIME_UNRESOLVED,
+    "regime_chop": VetoReason.NO_EDGE,  # No edge = abstention, not chaos claim
+    "regime_high_vol": VetoReason.REGIME_VOLATILE,  # Danger = should correlate with chaos
 }
 
 # v0.2 permitted risk caps (constitutional)

@@ -113,6 +113,7 @@ class AuthorityState:
     cert_path: Optional[Path] = None
     cert_body_sha256: Optional[str] = None  # Always computed from cert body (not legacy field)
     build_meta_sha256: Optional[str] = None
+    promoted_at: Optional[str] = None  # ISO timestamp from cert, marks authority epoch start
     demotions: List[DemotionEvent] = field(default_factory=list)
     started_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
@@ -299,10 +300,12 @@ def bind_authority(
     # Always compute cert_body_sha256 from cert content (works for both signed and legacy)
     state.cert_body_sha256 = compute_cert_body_sha256(cert)
     state.build_meta_sha256 = cert.get("build_meta_sha256")
+    state.promoted_at = cert.get("promoted_at")  # Authority epoch start
 
     logger.info("Certificate verified. Starting at v0.2 (inbox-authoritative).")
     logger.info(f"  cert_body_sha256: {_safe_prefix(state.cert_body_sha256)}...")
     logger.info(f"  build_meta_sha256: {_safe_prefix(state.build_meta_sha256)}...")
+    logger.info(f"  promoted_at: {state.promoted_at or 'none (all violations count)'}")
 
     return state
 
