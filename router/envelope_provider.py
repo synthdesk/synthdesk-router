@@ -24,7 +24,7 @@ import numpy as np
 
 # Kernel identity (frozen per release)
 KERNEL_VERSION = "bootstrap_mc_v0.2"
-KERNEL_BUILD_SHA = "bootstrap_mc_v0.2_20260112"  # Update on code changes
+KERNEL_BUILD_SHA = "bootstrap_mc_v0.2.1_20260112"  # Update on code changes (v0.2.1: asof_ts fix)
 
 
 @dataclass(frozen=True)
@@ -271,9 +271,19 @@ def make_envelope(
 # Tick buffer for runtime use
 # ---------------------------------------------------------------------
 
+@dataclass
+class TimestampedTick:
+    """Tick with timestamp for asof slicing."""
+    ts_epoch: float  # Unix timestamp
+    price: float
+
+
 class TickBuffer:
     """
     Circular buffer for maintaining recent tick prices per symbol.
+
+    CRITICAL: Stores timestamps to enforce tick_ts <= event_ts constraint.
+    This prevents future data leakage when router replays historical events.
 
     The router uses this to feed the envelope provider without
     reading the full tick file on each event.
@@ -287,40 +297,94 @@ class TickBuffer:
             max_size: Maximum ticks to retain per symbol
         """
         self._max_size = max_size
-        self._buffers: Dict[str, List[float]] = {}
+        self._buffers: Dict[str, List[TimestampedTick]] = {}
 
-    def add_tick(self, symbol: str, price: float) -> None:
-        """Add a tick to the buffer."""
+    def add_tick(self, symbol: str, ts_epoch: float, price: float) -> None:
+        """
+        Add a tick to the buffer.
+
+        Args:
+            symbol: Symbol identifier
+            ts_epoch: Unix timestamp of the tick
+            price: Tick price
+        """
         if symbol not in self._buffers:
             self._buffers[symbol] = []
 
         buf = self._buffers[symbol]
-        buf.append(price)
+        buf.append(TimestampedTick(ts_epoch=ts_epoch, price=price))
 
         # Trim if over capacity
         if len(buf) > self._max_size:
             # Keep most recent
             self._buffers[symbol] = buf[-self._max_size:]
 
-    def get_prices(self, symbol: str, n: Optional[int] = None) -> List[float]:
+    def get_prices(
+        self,
+        symbol: str,
+        asof_ts: Optional[float] = None,
+        n: Optional[int] = None,
+    ) -> List[float]:
         """
-        Get recent prices for symbol.
+        Get recent prices for symbol, respecting asof constraint.
+
+        CRITICAL: If asof_ts is provided, only returns ticks where
+        tick_ts <= asof_ts. This prevents future data leakage.
 
         Args:
             symbol: Symbol identifier
-            n: Number of recent prices (None = all)
+            asof_ts: Unix timestamp cutoff (only ticks at or before this time)
+            n: Number of recent prices to return (None = all matching)
 
         Returns:
-            List of prices (oldest first)
+            List of prices (oldest first), filtered by asof_ts if provided
         """
         buf = self._buffers.get(symbol, [])
-        if n is None or n >= len(buf):
-            return buf.copy()
-        return buf[-n:]
 
-    def count(self, symbol: str) -> int:
-        """Get tick count for symbol."""
-        return len(self._buffers.get(symbol, []))
+        if asof_ts is not None:
+            # Filter to ticks at or before asof_ts
+            # This is the critical data integrity gate
+            filtered = [t.price for t in buf if t.ts_epoch <= asof_ts]
+        else:
+            filtered = [t.price for t in buf]
+
+        if n is None or n >= len(filtered):
+            return filtered
+        return filtered[-n:]
+
+    def get_prices_with_timestamps(
+        self,
+        symbol: str,
+        asof_ts: Optional[float] = None,
+    ) -> List[Tuple[float, float]]:
+        """
+        Get (ts_epoch, price) tuples for debugging/audit.
+
+        Args:
+            symbol: Symbol identifier
+            asof_ts: Unix timestamp cutoff
+
+        Returns:
+            List of (ts_epoch, price) tuples
+        """
+        buf = self._buffers.get(symbol, [])
+
+        if asof_ts is not None:
+            return [(t.ts_epoch, t.price) for t in buf if t.ts_epoch <= asof_ts]
+        return [(t.ts_epoch, t.price) for t in buf]
+
+    def count(self, symbol: str, asof_ts: Optional[float] = None) -> int:
+        """
+        Get tick count for symbol.
+
+        Args:
+            symbol: Symbol identifier
+            asof_ts: If provided, count only ticks at or before this time
+        """
+        buf = self._buffers.get(symbol, [])
+        if asof_ts is not None:
+            return sum(1 for t in buf if t.ts_epoch <= asof_ts)
+        return len(buf)
 
     def clear(self, symbol: Optional[str] = None) -> None:
         """Clear buffer(s)."""
@@ -328,3 +392,17 @@ class TickBuffer:
             self._buffers.clear()
         elif symbol in self._buffers:
             del self._buffers[symbol]
+
+    def oldest_tick_ts(self, symbol: str) -> Optional[float]:
+        """Get timestamp of oldest tick for symbol (for debugging)."""
+        buf = self._buffers.get(symbol, [])
+        if buf:
+            return buf[0].ts_epoch
+        return None
+
+    def newest_tick_ts(self, symbol: str) -> Optional[float]:
+        """Get timestamp of newest tick for symbol (for debugging)."""
+        buf = self._buffers.get(symbol, [])
+        if buf:
+            return buf[-1].ts_epoch
+        return None

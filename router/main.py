@@ -121,9 +121,26 @@ def get_router_commit(repo_root: Path) -> str:
         return "unknown"
 
 
+def _parse_tick_timestamp(ts_str: str) -> Optional[float]:
+    """
+    Parse tick timestamp to Unix epoch.
+
+    Handles ISO format with timezone (e.g., "2026-01-12T00:00:09.345468+00:00").
+    """
+    try:
+        # Try ISO format with timezone
+        dt = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+        return dt.timestamp()
+    except (ValueError, AttributeError):
+        return None
+
+
 class TickWatcher:
     """
     Watch tick observation files and maintain rolling buffer per symbol.
+
+    CRITICAL: Stores tick timestamps to enforce tick_ts <= event_ts constraint.
+    This prevents future data leakage when router replays historical events.
 
     Tick files are daily: runs/0.2.0/YYYY-MM-DD/tick_observation.jsonl
     """
@@ -134,7 +151,7 @@ class TickWatcher:
 
         Args:
             runs_dir: Path to runs/0.2.0 directory
-            tick_buffer: Buffer to populate with ticks
+            tick_buffer: Buffer to populate with ticks (must store timestamps)
         """
         self.runs_dir = runs_dir
         self.tick_buffer = tick_buffer
@@ -173,8 +190,17 @@ class TickWatcher:
                         tick = json.loads(line)
                         symbol = tick.get("asset")
                         price = tick.get("price")
+                        ts_str = tick.get("ts_utc")
+
+                        # CRITICAL: Must have timestamp for asof filtering
+                        if not isinstance(ts_str, str):
+                            continue
+                        ts_epoch = _parse_tick_timestamp(ts_str)
+                        if ts_epoch is None:
+                            continue
+
                         if isinstance(symbol, str) and isinstance(price, (int, float)):
-                            self.tick_buffer.add_tick(symbol, float(price))
+                            self.tick_buffer.add_tick(symbol, ts_epoch, float(price))
                             count += 1
                     except json.JSONDecodeError:
                         continue
@@ -392,7 +418,13 @@ def run_runtime(
             result = evaluate_constraints(state_dict, symbol)
 
             # Get tick prices for real envelope (if enabled)
-            tick_prices = tick_buffer.get_prices(symbol) if use_real_kernel else None
+            # CRITICAL: Pass asof_ts to enforce tick_ts <= event_ts constraint
+            # This prevents future data leakage when replaying historical events
+            if use_real_kernel:
+                asof_ts = _parse_tick_timestamp(timestamp)
+                tick_prices = tick_buffer.get_prices(symbol, asof_ts=asof_ts) if asof_ts else None
+            else:
+                tick_prices = None
 
             if isinstance(result, VetoReason):
                 # Veto path: typed silence (always permitted)
