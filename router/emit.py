@@ -10,13 +10,15 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, Optional, Tuple
+from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from router.allocator import AllocationResult
     from router.constraints import VetoReason
 
 from router.envelope import make_mock_envelope
+from router.envelope_provider import Envelope as RealEnvelope
+from router.envelope_provider import make_envelope as make_real_envelope
 from schemas.router_intent import validate_router_intent
 
 logger = logging.getLogger(__name__)
@@ -84,6 +86,8 @@ def emit_intent(
     allocation: "AllocationResult",
     source_event_id: str,
     source_ts: str,
+    tick_prices: Optional[List[float]] = None,
+    use_real_kernel: bool = True,
 ) -> Tuple[bool, Optional[str]]:
     """
     Append router.intent event to spine.
@@ -97,6 +101,8 @@ def emit_intent(
         allocation: AllocationResult with quantized posture fields
         source_event_id: Event ID that triggered this intent
         source_ts: Timestamp from source event
+        tick_prices: Recent tick prices for real envelope (optional)
+        use_real_kernel: If True and tick_prices provided, use bootstrap MC kernel
 
     Returns:
         (success, error) - success=True if intent emitted, else error explains why
@@ -112,14 +118,23 @@ def emit_intent(
         "rationale": allocation.rationale,
     }
 
-    # Attach envelope (deterministic uncertainty bands)
-    envelope = make_mock_envelope(
-        intent_side=allocation.direction.value,
-        confidence=allocation.entropy_factor,
-        vetoed=False,
-        size=allocation.size_pct_q / allocation.size_pct_scale,
-    )
-    payload["envelope"] = envelope.to_dict()
+    # Attach envelope - use real kernel if tick data available
+    if use_real_kernel and tick_prices and len(tick_prices) >= 100:
+        real_env = make_real_envelope(
+            symbol=symbol,
+            prices=tick_prices,
+            source_event_id=source_event_id,
+        )
+        payload["envelope"] = real_env.to_dict()
+    else:
+        # Fallback to mock envelope
+        envelope = make_mock_envelope(
+            intent_side=allocation.direction.value,
+            confidence=allocation.entropy_factor,
+            vetoed=False,
+            size=allocation.size_pct_q / allocation.size_pct_scale,
+        )
+        payload["envelope"] = envelope.to_dict()
 
     payload = canonicalize_payload(payload, skip_unknown=True)
 
@@ -157,6 +172,8 @@ def emit_shadow_intent(
     blocked_by: str,
     source_event_id: str,
     source_ts: str,
+    tick_prices: Optional[List[float]] = None,
+    use_real_kernel: bool = True,
 ) -> bool:
     """
     Append router.intent_shadow event to spine.
@@ -173,6 +190,8 @@ def emit_shadow_intent(
         blocked_by: Why this intent was blocked (e.g., "authority_gate")
         source_event_id: Event ID that triggered this intent
         source_ts: Timestamp from source event
+        tick_prices: Recent tick prices for real envelope (optional)
+        use_real_kernel: If True and tick_prices provided, use bootstrap MC kernel
 
     Returns:
         True if written successfully, False on error
@@ -188,14 +207,23 @@ def emit_shadow_intent(
         "counterfactual": True,
     }
 
-    # Attach envelope (same as real intent would have)
-    envelope = make_mock_envelope(
-        intent_side=allocation.direction.value,
-        confidence=allocation.entropy_factor,
-        vetoed=False,
-        size=allocation.size_pct_q / allocation.size_pct_scale,
-    )
-    payload["envelope"] = envelope.to_dict()
+    # Attach envelope - use real kernel if tick data available
+    if use_real_kernel and tick_prices and len(tick_prices) >= 100:
+        real_env = make_real_envelope(
+            symbol=symbol,
+            prices=tick_prices,
+            source_event_id=source_event_id,
+        )
+        payload["envelope"] = real_env.to_dict()
+    else:
+        # Fallback to mock envelope
+        envelope = make_mock_envelope(
+            intent_side=allocation.direction.value,
+            confidence=allocation.entropy_factor,
+            vetoed=False,
+            size=allocation.size_pct_q / allocation.size_pct_scale,
+        )
+        payload["envelope"] = envelope.to_dict()
 
     payload = canonicalize_payload(payload, skip_unknown=True)
 

@@ -32,6 +32,7 @@ from router.authority import (
 )
 from router.constraints import VetoReason, evaluate_constraints, should_emit_intent
 from router.emit import emit_intent, emit_shadow_intent, emit_veto
+from router.envelope_provider import TickBuffer
 from router.spine_reader import SpineReader
 from router.state import RouterState
 
@@ -118,6 +119,70 @@ def get_router_commit(repo_root: Path) -> str:
         return result.stdout.strip()
     except Exception:
         return "unknown"
+
+
+class TickWatcher:
+    """
+    Watch tick observation files and maintain rolling buffer per symbol.
+
+    Tick files are daily: runs/0.2.0/YYYY-MM-DD/tick_observation.jsonl
+    """
+
+    def __init__(self, runs_dir: Path, tick_buffer: TickBuffer):
+        """
+        Initialize tick watcher.
+
+        Args:
+            runs_dir: Path to runs/0.2.0 directory
+            tick_buffer: Buffer to populate with ticks
+        """
+        self.runs_dir = runs_dir
+        self.tick_buffer = tick_buffer
+        self._last_positions: Dict[Path, int] = {}
+
+    def _get_today_tick_file(self) -> Optional[Path]:
+        """Get path to today's tick file."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        tick_file = self.runs_dir / today / "tick_observation.jsonl"
+        if tick_file.exists():
+            return tick_file
+        return None
+
+    def poll_ticks(self) -> int:
+        """
+        Poll for new ticks and update buffer.
+
+        Returns:
+            Number of new ticks consumed
+        """
+        tick_file = self._get_today_tick_file()
+        if tick_file is None:
+            return 0
+
+        last_pos = self._last_positions.get(tick_file, 0)
+        count = 0
+
+        try:
+            with tick_file.open("r", encoding="utf-8") as f:
+                f.seek(last_pos)
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        tick = json.loads(line)
+                        symbol = tick.get("asset")
+                        price = tick.get("price")
+                        if isinstance(symbol, str) and isinstance(price, (int, float)):
+                            self.tick_buffer.add_tick(symbol, float(price))
+                            count += 1
+                    except json.JSONDecodeError:
+                        continue
+                self._last_positions[tick_file] = f.tell()
+        except OSError:
+            pass
+
+        return count
 
 
 def emit_demotion_event(
@@ -252,6 +317,7 @@ def run_runtime(
     poll_interval: float,
     authority_state: AuthorityState,
     demotions_path: Optional[Path] = None,
+    use_real_kernel: bool = True,
 ) -> None:
     """
     Long-running router runtime with authority gating.
@@ -261,6 +327,7 @@ def run_runtime(
         poll_interval: Seconds between polls
         authority_state: Bound authority state
         demotions_path: Path for durable demotion recording
+        use_real_kernel: If True, use bootstrap MC kernel (requires tick data)
     """
     # Pass promoted_at as authority epoch: violations before this timestamp
     # cannot demote the current authority binding (they belong to a prior epoch)
@@ -268,12 +335,21 @@ def run_runtime(
     reader = SpineReader(spine_path, poll_interval)
     gated_router = AuthorityGatedRouter(authority_state, router_state, spine_path, demotions_path)
 
+    # Setup tick buffer and watcher for real MC kernel
+    tick_buffer = TickBuffer(max_size=1200)  # ~20 minutes at 1 tick/sec
+    runs_dir = spine_path.parent  # Assume spine is in runs/0.2.0/
+    tick_watcher = TickWatcher(runs_dir, tick_buffer)
+
     print(f"router v{ROUTER_VERSION} runtime started", file=sys.stderr, flush=True)
     print(f"authority_level: {authority_state.level}", file=sys.stderr, flush=True)
     print(f"spine: {spine_path}", file=sys.stderr, flush=True)
     print(f"poll: {poll_interval}s", file=sys.stderr, flush=True)
+    print(f"real_kernel: {use_real_kernel}", file=sys.stderr, flush=True)
 
     for event in reader.tail(skip_existing=False):
+        # Poll ticks on each iteration (cheap if no new data)
+        tick_watcher.poll_ticks()
+
         event_type = event.get("event_type")
         event_id = event.get("event_id")
         timestamp = event.get("timestamp")
@@ -315,6 +391,9 @@ def run_runtime(
             }
             result = evaluate_constraints(state_dict, symbol)
 
+            # Get tick prices for real envelope (if enabled)
+            tick_prices = tick_buffer.get_prices(symbol) if use_real_kernel else None
+
             if isinstance(result, VetoReason):
                 # Veto path: typed silence (always permitted)
                 last_veto = router_state.get_last_veto_reason(symbol)
@@ -342,6 +421,8 @@ def run_runtime(
                             blocked_by="authority_gate",
                             source_event_id=event_id,
                             source_ts=timestamp,
+                            tick_prices=tick_prices,
+                            use_real_kernel=use_real_kernel,
                         )
                         router_state.set_last_allocation(symbol, result)
 
@@ -365,6 +446,8 @@ def run_runtime(
                         allocation=result,
                         source_event_id=event_id,
                         source_ts=timestamp,
+                        tick_prices=tick_prices,
+                        use_real_kernel=use_real_kernel,
                     )
                     router_state.set_last_allocation(symbol, result)
 
@@ -528,6 +611,11 @@ def main() -> None:
         action="store_true",
         help="DANGEROUS: Accept unsigned (legacy self-hash) certificates. Development only.",
     )
+    parser.add_argument(
+        "--mock-kernel",
+        action="store_true",
+        help="Use mock envelope kernel instead of real bootstrap MC (for testing/fallback)",
+    )
 
     args = parser.parse_args()
 
@@ -567,7 +655,8 @@ def main() -> None:
         output_spine = Path(args.replay[1])
         run_replay(input_spine, output_spine, authority_state)
     else:
-        run_runtime(args.spine, args.poll, authority_state, demotions_path)
+        use_real_kernel = not args.mock_kernel
+        run_runtime(args.spine, args.poll, authority_state, demotions_path, use_real_kernel)
 
 
 if __name__ == "__main__":
