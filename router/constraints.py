@@ -9,6 +9,10 @@ Surface invariants (defense-in-depth):
 - Zero size with non-flat direction → veto
 - Invalid risk_cap for v0.2 → veto
 - Empty rationale → add deterministic rationale
+
+Intent strength classification:
+- Weak intent (C_WEAK_MIN ≤ confidence < C_STRONG_MIN): question with directional hypothesis
+- Strong intent (confidence ≥ C_STRONG_MIN): decision with execution authority
 """
 
 from enum import Enum
@@ -21,6 +25,20 @@ from router.allocator import (
     SIZE_PCT_SCALE,
     compute_allocation_from_state,
 )
+
+
+# ---------------------------
+# Confidence Thresholds (Frozen)
+# ---------------------------
+
+# Minimum confidence for weak intent emission
+# Below this: no edge detected, veto
+C_WEAK_MIN: float = 0.15
+
+# Minimum confidence for strong intent emission
+# Below this but ≥ C_WEAK_MIN: weak intent (question)
+# At or above: strong intent (decision)
+C_STRONG_MIN: float = 0.50
 
 
 class VetoReason(str, Enum):
@@ -44,18 +62,32 @@ class VetoReason(str, Enum):
     # Edge-absent vetoes (abstention, not chaos claim)
     REGIME_UNRESOLVED = "regime_unresolved"  # router cannot derive exposure from regime state
     NO_EDGE = "no_edge"  # chop regime: no directional signal detected
+    CONFIDENCE_TOO_LOW = "confidence_too_low"  # confidence < C_WEAK_MIN
 
     # Danger vetoes (should correlate with chaos)
     REGIME_VOLATILE = "regime_volatile"  # high_vol regime: excess risk
 
 
+class IntentStrength(str, Enum):
+    """
+    Intent strength classification.
+
+    Weak intents are questions with directional hypothesis.
+    Strong intents are decisions with execution authority.
+    """
+
+    WEAK = "weak"    # C_WEAK_MIN ≤ confidence < C_STRONG_MIN
+    STRONG = "strong"  # confidence ≥ C_STRONG_MIN
+
+
 # Map allocator veto reasons to constitutional VetoReason
 _VETO_REASON_MAP = {
     "input_unavailable": VetoReason.INPUT_UNAVAILABLE,
-    "violation_active": VetoReason.INVARIANT_VIOLATION,
+    "symbol_degraded": VetoReason.INPUT_UNAVAILABLE,  # Non-critical violation, auto-recovers
     "regime_unresolved": VetoReason.REGIME_UNRESOLVED,
     "regime_chop": VetoReason.NO_EDGE,  # No edge = abstention, not chaos claim
     "regime_high_vol": VetoReason.REGIME_VOLATILE,  # Danger = should correlate with chaos
+    # Note: Critical violations trigger authority demotion (not allocator veto)
 }
 
 # v0.2 permitted risk caps (constitutional)
@@ -85,6 +117,26 @@ def _validate_allocation_surface(allocation: AllocationResult) -> Optional[str]:
         return "empty_rationale"
 
     return None
+
+
+def classify_intent_strength(confidence: float) -> Optional[IntentStrength]:
+    """
+    Classify intent strength based on confidence.
+
+    Args:
+        confidence: Regime confidence from classifier [0, 1]
+
+    Returns:
+        IntentStrength.WEAK if C_WEAK_MIN ≤ confidence < C_STRONG_MIN
+        IntentStrength.STRONG if confidence ≥ C_STRONG_MIN
+        None if confidence < C_WEAK_MIN (should veto)
+    """
+    if confidence < C_WEAK_MIN:
+        return None  # Below threshold, veto
+    elif confidence < C_STRONG_MIN:
+        return IntentStrength.WEAK
+    else:
+        return IntentStrength.STRONG
 
 
 def evaluate_constraints(
@@ -133,6 +185,55 @@ def evaluate_constraints(
 
     # No veto → return allocation
     return allocation
+
+
+def evaluate_constraints_with_strength(
+    state_dict: Dict,
+    symbol: str,
+) -> tuple[Union[AllocationResult, VetoReason], Optional[IntentStrength]]:
+    """
+    Evaluate constraints and return allocation/veto with intent strength.
+
+    Extended version of evaluate_constraints that also classifies intent strength
+    based on regime confidence.
+
+    Returns:
+        (result, intent_strength) where:
+        - result is AllocationResult or VetoReason
+        - intent_strength is WEAK, STRONG, or None (if veto)
+
+    Intent strength classification:
+    - confidence < C_WEAK_MIN → CONFIDENCE_TOO_LOW veto
+    - C_WEAK_MIN ≤ confidence < C_STRONG_MIN → WEAK intent
+    - confidence ≥ C_STRONG_MIN → STRONG intent
+    """
+    allocation, veto_reason = compute_allocation_from_state(state_dict, symbol)
+
+    if veto_reason:
+        # Map to constitutional veto reason
+        return (_VETO_REASON_MAP.get(veto_reason, VetoReason.REGIME_UNRESOLVED), None)
+
+    # Flat allocation is also a veto (no "flat intent")
+    if allocation.direction == Direction.FLAT:
+        return (VetoReason.REGIME_UNRESOLVED, None)
+
+    # Surface invariant validation (defense-in-depth)
+    surface_error = _validate_allocation_surface(allocation)
+    if surface_error:
+        # Surface violation → veto (fail closed)
+        return (VetoReason.REGIME_UNRESOLVED, None)
+
+    # Classify intent strength based on confidence
+    # entropy_factor represents the confidence used in allocation
+    confidence = allocation.entropy_factor
+    strength = classify_intent_strength(confidence)
+
+    if strength is None:
+        # Confidence too low → veto
+        return (VetoReason.CONFIDENCE_TOO_LOW, None)
+
+    # Return allocation with strength classification
+    return (allocation, strength)
 
 
 def should_emit_intent(

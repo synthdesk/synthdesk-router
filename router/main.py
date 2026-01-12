@@ -30,8 +30,13 @@ from router.authority import (
     bind_authority,
     create_severity_gated_violation_check,
 )
-from router.constraints import VetoReason, evaluate_constraints, should_emit_intent
-from router.emit import emit_intent, emit_shadow_intent, emit_veto
+from router.constraints import (
+    IntentStrength,
+    VetoReason,
+    evaluate_constraints_with_strength,
+    should_emit_intent,
+)
+from router.emit import emit_intent, emit_shadow_intent, emit_veto, emit_weak_intent
 from router.envelope_provider import TickBuffer
 from router.spine_reader import SpineReader
 from router.state import RouterState
@@ -409,13 +414,13 @@ def run_runtime(
             if not emit_allowed:
                 continue
 
-            # Evaluate constraints → intent or veto reason
+            # Evaluate constraints → intent or veto reason, with strength classification
             state_dict = {
                 "system": router_state.system,
                 "symbols": router_state.symbols,
                 "degraded_symbols": router_state.get_degraded_symbols(),
             }
-            result = evaluate_constraints(state_dict, symbol)
+            result, intent_strength = evaluate_constraints_with_strength(state_dict, symbol)
 
             # Get tick prices for real envelope (if enabled)
             # CRITICAL: Pass asof_ts to enforce tick_ts <= event_ts constraint
@@ -440,6 +445,26 @@ def run_runtime(
                     router_state.set_last_veto_reason(symbol, result.value)
             elif isinstance(result, AllocationResult):
                 # Intent path: positive exposure authority (v0.2 allocator)
+
+                # WEAK INTENT PATH: questions, not decisions
+                # - NOT gated by authority
+                # - Do NOT update state.last_allocation (independent tracking)
+                # - Always emit (no dedup against strong intents)
+                if intent_strength == IntentStrength.WEAK:
+                    emit_weak_intent(
+                        spine_path=spine_path,
+                        symbol=symbol,
+                        allocation=result,
+                        source_event_id=event_id,
+                        source_ts=timestamp,
+                        tick_prices=tick_prices,
+                        use_real_kernel=use_real_kernel,
+                    )
+                    # NOTE: Do NOT update router_state.set_last_allocation()
+                    # Weak intents track independently from strong intents
+                    continue
+
+                # STRONG INTENT PATH: decisions
                 # GATED: non-flat requires v0.2+ authority
                 if result.direction != Direction.FLAT and not gated_router.can_emit_non_flat():
                     # Authority gate: emit shadow intent (counterfactual) + veto
@@ -543,13 +568,13 @@ def run_replay(
             if not emit_allowed:
                 continue
 
-            # Evaluate constraints → intent or veto reason
+            # Evaluate constraints → intent or veto reason, with strength classification
             state_dict = {
                 "system": router_state.system,
                 "symbols": router_state.symbols,
                 "degraded_symbols": router_state.get_degraded_symbols(),
             }
-            result = evaluate_constraints(state_dict, symbol)
+            result, intent_strength = evaluate_constraints_with_strength(state_dict, symbol)
 
             if isinstance(result, VetoReason):
                 # Veto path: typed silence
@@ -564,7 +589,25 @@ def run_replay(
                     )
                     router_state.set_last_veto_reason(symbol, result.value)
             elif isinstance(result, AllocationResult):
-                # Intent path: positive exposure authority (GATED, v0.2 allocator)
+                # Intent path: positive exposure authority (v0.2 allocator)
+
+                # WEAK INTENT PATH: questions, not decisions
+                # - NOT gated by authority
+                # - Do NOT update state.last_allocation (independent tracking)
+                # - Always emit (no dedup against strong intents)
+                if intent_strength == IntentStrength.WEAK:
+                    emit_weak_intent(
+                        spine_path=output_spine,
+                        symbol=symbol,
+                        allocation=result,
+                        source_event_id=event_id,
+                        source_ts=timestamp,
+                    )
+                    # NOTE: Do NOT update router_state.set_last_allocation()
+                    # Weak intents track independently from strong intents
+                    continue
+
+                # STRONG INTENT PATH: decisions (GATED)
                 if result.direction != Direction.FLAT and not gated_router.can_emit_non_flat():
                     # Authority gate: emit shadow intent (counterfactual) + veto
                     last_allocation = router_state.get_last_allocation(symbol)

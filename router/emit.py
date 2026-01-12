@@ -165,6 +165,100 @@ def emit_intent(
         return (False, "write_failed")
 
 
+def emit_weak_intent(
+    spine_path: Path,
+    symbol: str,
+    allocation: "AllocationResult",
+    source_event_id: str,
+    source_ts: str,
+    tick_prices: Optional[List[float]] = None,
+    use_real_kernel: bool = True,
+) -> Tuple[bool, Optional[str]]:
+    """
+    Append router.intent_weak event to spine.
+
+    Weak intents are "questions with a directional hypothesis" - they express
+    a directional lean but lack conviction for execution authority.
+
+    Properties:
+    - NOT gated by authority (questions, not decisions)
+    - Do NOT update state.last_allocation (no dedup against them)
+    - May update independently of strong intents
+    - Scored by EVT-1 but not used for live execution
+
+    Args:
+        spine_path: Path to event_spine.jsonl
+        symbol: Symbol identifier
+        allocation: AllocationResult with quantized posture fields
+        source_event_id: Event ID that triggered this intent
+        source_ts: Timestamp from source event
+        tick_prices: Recent tick prices for real envelope (optional)
+        use_real_kernel: If True and tick_prices provided, use bootstrap MC kernel
+
+    Returns:
+        (success, error) - success=True if intent emitted, else error explains why
+        On validation failure, a veto is emitted instead (fail closed).
+    """
+    # Build payload with quantized fields (v0.2)
+    payload = {
+        "symbol": symbol,
+        "direction": allocation.direction.value,
+        "size_pct_q": allocation.size_pct_q,
+        "size_pct_scale": allocation.size_pct_scale,
+        "risk_cap": allocation.risk_cap.value,
+        "rationale": allocation.rationale,
+        "strength": "weak",  # Explicit marker
+    }
+
+    # Attach envelope - use real kernel if tick data available
+    if use_real_kernel and tick_prices and len(tick_prices) >= 100:
+        real_env = make_real_envelope(
+            symbol=symbol,
+            prices=tick_prices,
+            source_event_id=source_event_id,
+        )
+        payload["envelope"] = real_env.to_dict()
+    else:
+        # Fallback to mock envelope
+        envelope = make_mock_envelope(
+            intent_side=allocation.direction.value,
+            confidence=allocation.entropy_factor,
+            vetoed=False,
+            size=allocation.size_pct_q / allocation.size_pct_scale,
+        )
+        payload["envelope"] = envelope.to_dict()
+
+    payload = canonicalize_payload(payload, skip_unknown=True)
+
+    # EMISSION BOUNDARY: Validate before write
+    # Note: We reuse router_intent validation for structure,
+    # the "strength" field is additional metadata
+    try:
+        validate_router_intent(payload)
+    except ValueError as e:
+        # Fail closed: emit veto instead of invalid intent
+        _emit_surface_veto(
+            spine_path=spine_path,
+            symbol=symbol,
+            validation_error=str(e),
+            source_event_id=source_event_id,
+            source_ts=source_ts,
+        )
+        return (False, f"surface_invalid: {e}")
+
+    event = {
+        "event_type": "router.intent_weak",
+        "payload": payload,
+        "source_event_id": source_event_id,
+        "source_ts": source_ts,
+    }
+
+    if _write_event(spine_path, event):
+        return (True, None)
+    else:
+        return (False, "write_failed")
+
+
 def emit_shadow_intent(
     spine_path: Path,
     symbol: str,
