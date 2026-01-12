@@ -38,10 +38,14 @@ class RouterState:
         self.system = {
             "listener_alive": False,
             "last_listener_event_ts": None,
-            "violation_active": False,
+            # Violation memory (passive - authority plane decides demotion)
             "last_violation_ts": None,
+            "last_violation_severity": None,
+            "last_violation_symbol": None,
         }
         self._authority_epoch_ts = authority_epoch_ts
+        # Degraded symbols: non-critical violations cause posture degradation, not authority demotion
+        self._degraded_symbols: set[str] = set()
 
     def update_from_event(self, event: Dict) -> None:
         """
@@ -66,23 +70,45 @@ class RouterState:
             self.system["listener_alive"] = False
             self.system["last_listener_event_ts"] = timestamp
 
-        # Invariant violations (epoch-scoped)
+        # Invariant violations (epoch-scoped, passive recording)
+        # State records ALL violations within epoch. Authority plane decides demotion policy.
         elif event_type == "invariant.violation":
-            # Only count violations within the current authority epoch.
-            # Pre-epoch violations cannot demote a later authority binding.
+            # Only record violations within the current authority epoch.
+            # Pre-epoch violations cannot affect a later authority binding.
             if self._authority_epoch_ts is None or timestamp >= self._authority_epoch_ts:
-                self.system["violation_active"] = True
-                self.system["last_violation_ts"] = timestamp
+                severity = payload.get("severity", "warning")
+                symbol = payload.get("details", {}).get("observed", {}).get("missing_pairs", [None])[0]
+                if not symbol:
+                    # Try alternate payload shapes
+                    symbol = payload.get("symbol")
 
-        # Market regime updates
+                # Record the violation (passive memory)
+                self.system["last_violation_ts"] = timestamp
+                self.system["last_violation_severity"] = severity
+                self.system["last_violation_symbol"] = symbol
+
+                # Track degraded symbols for non-critical violations (posture gating)
+                if severity != "critical" and symbol:
+                    self._degraded_symbols.add(symbol)
+
+        # Market regime updates (also clears degraded status - auto-recovery)
         elif event_type == "market.regime":
             symbol = payload.get("symbol")
             regime = payload.get("regime")
+            confidence = payload.get("confidence")
             if isinstance(symbol, str) and isinstance(regime, str):
                 if symbol not in self.symbols:
                     self.symbols[symbol] = {}
                 self.symbols[symbol]["regime"] = regime
                 self.symbols[symbol]["last_regime_ts"] = timestamp
+                # Store regime confidence for entropy computation
+                if confidence is not None:
+                    try:
+                        self.symbols[symbol]["regime_confidence"] = float(confidence)
+                    except (TypeError, ValueError):
+                        pass
+                # Auto-recovery: successful regime emission clears degraded status
+                self._degraded_symbols.discard(symbol)
 
         elif event_type == "market.regime_change":
             symbol = payload.get("symbol")
@@ -193,6 +219,40 @@ class RouterState:
         """Check if listener is alive."""
         return self.system["listener_alive"]
 
-    def is_violation_active(self) -> bool:
-        """Check if invariant violation is active."""
-        return self.system["violation_active"]
+    def get_last_violation(self) -> tuple[Optional[str], Optional[str], Optional[str]]:
+        """
+        Get last recorded violation info.
+
+        Returns:
+            (timestamp, severity, symbol) - all None if no violation recorded
+        """
+        return (
+            self.system["last_violation_ts"],
+            self.system["last_violation_severity"],
+            self.system["last_violation_symbol"],
+        )
+
+    def has_violation(self) -> bool:
+        """Check if any violation has been recorded (passive memory, not demotion decision)."""
+        return self.system["last_violation_ts"] is not None
+
+    def is_symbol_degraded(self, symbol: str) -> bool:
+        """
+        Check if symbol is in degraded state due to non-critical violation.
+
+        Degraded symbols should receive flat/veto posture but do NOT
+        trigger authority demotion. Auto-recovers on next healthy regime event.
+        """
+        return symbol in self._degraded_symbols
+
+    def get_degraded_symbols(self) -> set[str]:
+        """Get set of currently degraded symbols."""
+        return self._degraded_symbols.copy()
+
+    def clear_degraded(self, symbol: str) -> None:
+        """
+        Manually clear degraded status for a symbol.
+
+        Normally auto-clears on market.regime event.
+        """
+        self._degraded_symbols.discard(symbol)

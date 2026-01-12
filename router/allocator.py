@@ -342,20 +342,23 @@ def compute_allocation_from_state(
             "input_unavailable",
         )
 
-    if system.get("violation_active", False):
+    # Check for degraded symbol (non-critical violation) - posture gate, not authority demotion
+    # Note: Critical violations are handled by authority plane (demotion to v0.1), not here
+    degraded_symbols = state_dict.get("degraded_symbols", set())
+    if symbol in degraded_symbols:
         return (
             AllocationResult(
                 direction=Direction.FLAT,
                 size_pct_q=0,
                 size_pct_scale=SIZE_PCT_SCALE,
                 risk_cap=RiskCap.ZERO,
-                rationale=["veto: violation_active"],
+                rationale=["veto: symbol_degraded (non-critical violation, auto-recovers)"],
                 base_allocation_q=0,
                 entropy_factor=0.0,
                 uncertainty_discount=1.0,
                 final_factor=0.0,
             ),
-            "violation_active",
+            "symbol_degraded",
         )
 
     # Get regime
@@ -412,8 +415,22 @@ def compute_allocation_from_state(
         )
 
     # Compute allocation for intent-producing regimes
-    # TODO: Derive entropy from actual state when available
-    entropy = default_entropy()
+    # Use actual regime confidence if available (Option 1.5: state-dependent entropy)
+    regime_confidence = symbol_state.get("regime_confidence")
+    if regime_confidence is not None:
+        try:
+            conf = float(regime_confidence)
+            # Clamp to [0.1, 1.0] - never fully uncertain
+            conf = max(0.1, min(1.0, conf))
+            entropy = EntropyState(
+                regime_confidence=conf,
+                regime_age_seconds=0.0,  # Fresh (just updated)
+                transition_proximity=0.2,  # Low assumed instability
+            )
+        except (TypeError, ValueError):
+            entropy = default_entropy()
+    else:
+        entropy = default_entropy()
 
     allocation = allocate(regime, entropy)
 

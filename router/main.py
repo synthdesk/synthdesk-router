@@ -28,10 +28,10 @@ from router.authority import (
     AuthorityState,
     DemotionWatcher,
     bind_authority,
-    create_violation_active_check,
+    create_severity_gated_violation_check,
 )
 from router.constraints import VetoReason, evaluate_constraints, should_emit_intent
-from router.emit import emit_intent, emit_veto
+from router.emit import emit_intent, emit_shadow_intent, emit_veto
 from router.spine_reader import SpineReader
 from router.state import RouterState
 
@@ -207,10 +207,11 @@ class AuthorityGatedRouter:
         self.spine_path = spine_path
         self.demotions_path = demotions_path
 
-        # Setup demotion watcher
+        # Setup demotion watcher with severity-gated violation check
+        # Only critical violations trigger authority demotion; warnings degrade posture only
         self.demotion_watcher = DemotionWatcher(authority_state)
         self.demotion_watcher.add_check(
-            create_violation_active_check(router_state.is_violation_active)
+            create_severity_gated_violation_check(router_state.get_last_violation)
         )
 
         # Track if we've already emitted demotion for current session
@@ -310,6 +311,7 @@ def run_runtime(
             state_dict = {
                 "system": router_state.system,
                 "symbols": router_state.symbols,
+                "degraded_symbols": router_state.get_degraded_symbols(),
             }
             result = evaluate_constraints(state_dict, symbol)
 
@@ -329,11 +331,20 @@ def run_runtime(
                 # Intent path: positive exposure authority (v0.2 allocator)
                 # GATED: non-flat requires v0.2+ authority
                 if result.direction != Direction.FLAT and not gated_router.can_emit_non_flat():
-                    # Authority gate: emit veto, not fake flat intent
-                    print(
-                        f"AUTHORITY GATE: non-flat intent blocked (level={gated_router.get_authority_level()})",
-                        file=sys.stderr,
-                    )
+                    # Authority gate: emit shadow intent (counterfactual) + veto
+                    # Shadow intent feeds EVT-1 without granting real authority
+                    last_allocation = router_state.get_last_allocation(symbol)
+                    if should_emit_intent(result, last_allocation):
+                        emit_shadow_intent(
+                            spine_path=spine_path,
+                            symbol=symbol,
+                            allocation=result,
+                            blocked_by="authority_gate",
+                            source_event_id=event_id,
+                            source_ts=timestamp,
+                        )
+                        router_state.set_last_allocation(symbol, result)
+
                     last_veto = router_state.get_last_veto_reason(symbol)
                     if VetoReason.AUTHORITY_GATE.value != last_veto:
                         emit_veto(
@@ -344,7 +355,7 @@ def run_runtime(
                             source_ts=timestamp,
                         )
                         router_state.set_last_veto_reason(symbol, VetoReason.AUTHORITY_GATE.value)
-                    continue  # Skip intent emission entirely
+                    continue  # Skip real intent emission
 
                 last_allocation = router_state.get_last_allocation(symbol)
                 if should_emit_intent(result, last_allocation):
@@ -421,6 +432,7 @@ def run_replay(
             state_dict = {
                 "system": router_state.system,
                 "symbols": router_state.symbols,
+                "degraded_symbols": router_state.get_degraded_symbols(),
             }
             result = evaluate_constraints(state_dict, symbol)
 
@@ -439,7 +451,19 @@ def run_replay(
             elif isinstance(result, AllocationResult):
                 # Intent path: positive exposure authority (GATED, v0.2 allocator)
                 if result.direction != Direction.FLAT and not gated_router.can_emit_non_flat():
-                    # Authority gate: emit veto, not fake flat intent
+                    # Authority gate: emit shadow intent (counterfactual) + veto
+                    last_allocation = router_state.get_last_allocation(symbol)
+                    if should_emit_intent(result, last_allocation):
+                        emit_shadow_intent(
+                            spine_path=output_spine,
+                            symbol=symbol,
+                            allocation=result,
+                            blocked_by="authority_gate",
+                            source_event_id=event_id,
+                            source_ts=timestamp,
+                        )
+                        router_state.set_last_allocation(symbol, result)
+
                     last_veto = router_state.get_last_veto_reason(symbol)
                     if VetoReason.AUTHORITY_GATE.value != last_veto:
                         emit_veto(
@@ -450,7 +474,7 @@ def run_replay(
                             source_ts=timestamp,
                         )
                         router_state.set_last_veto_reason(symbol, VetoReason.AUTHORITY_GATE.value)
-                    continue  # Skip intent emission entirely
+                    continue  # Skip real intent emission
 
                 last_allocation = router_state.get_last_allocation(symbol)
                 if should_emit_intent(result, last_allocation):

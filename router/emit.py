@@ -150,6 +150,65 @@ def emit_intent(
         return (False, "write_failed")
 
 
+def emit_shadow_intent(
+    spine_path: Path,
+    symbol: str,
+    allocation: "AllocationResult",
+    blocked_by: str,
+    source_event_id: str,
+    source_ts: str,
+) -> bool:
+    """
+    Append router.intent_shadow event to spine.
+
+    Shadow intents are counterfactual: what the router WOULD emit if authority
+    permitted. They are NOT actionable and carry explicit blocked_by tag.
+
+    Purpose: Feed EVT-1 trials without granting real authority.
+
+    Args:
+        spine_path: Path to event_spine.jsonl
+        symbol: Symbol identifier
+        allocation: AllocationResult (the blocked intent)
+        blocked_by: Why this intent was blocked (e.g., "authority_gate")
+        source_event_id: Event ID that triggered this intent
+        source_ts: Timestamp from source event
+
+    Returns:
+        True if written successfully, False on error
+    """
+    payload = {
+        "symbol": symbol,
+        "direction": allocation.direction.value,
+        "size_pct_q": allocation.size_pct_q,
+        "size_pct_scale": allocation.size_pct_scale,
+        "risk_cap": allocation.risk_cap.value,
+        "rationale": allocation.rationale,
+        "blocked_by": blocked_by,
+        "counterfactual": True,
+    }
+
+    # Attach envelope (same as real intent would have)
+    envelope = make_mock_envelope(
+        intent_side=allocation.direction.value,
+        confidence=allocation.entropy_factor,
+        vetoed=False,
+        size=allocation.size_pct_q / allocation.size_pct_scale,
+    )
+    payload["envelope"] = envelope.to_dict()
+
+    payload = canonicalize_payload(payload, skip_unknown=True)
+
+    event = {
+        "event_type": "router.intent_shadow",
+        "payload": payload,
+        "source_event_id": source_event_id,
+        "source_ts": source_ts,
+    }
+
+    return _write_event(spine_path, event)
+
+
 def emit_veto(
     spine_path: Path,
     symbol: str,
