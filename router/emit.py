@@ -3,12 +3,15 @@ Intent and veto emission - Write router events to spine.
 
 Constitutional exhaust port.
 Emission boundary: validates before write, fails closed to veto.
+
+v0.3: All intents require expiry fields (valid_until_ts, horizon_minutes, exit_trigger, entry_basis_event_id).
 """
 
 from __future__ import annotations
 
 import json
 import logging
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
 
@@ -16,12 +19,28 @@ if TYPE_CHECKING:
     from router.allocator import AllocationResult
     from router.constraints import VetoReason
 
-from router.envelope import make_mock_envelope
+from router.envelope import DEFAULT_HORIZON_MINUTES, make_mock_envelope
 from router.envelope_provider import Envelope as RealEnvelope
 from router.envelope_provider import make_envelope as make_real_envelope
-from schemas.router_intent import validate_router_intent
+from schemas.router_intent import INTENT_SCHEMA_VERSION, validate_router_intent
 
 logger = logging.getLogger(__name__)
+
+# Default exit trigger (v0.3 constitutional)
+DEFAULT_EXIT_TRIGGER = "time_stop"
+
+def _parse_source_ts(source_ts: str) -> datetime:
+    """Parse source timestamp string to datetime."""
+    normalized = source_ts.replace("Z", "+00:00")
+    return datetime.fromisoformat(normalized)
+
+
+def _compute_valid_until(source_ts: str, horizon_minutes: int) -> str:
+    """Compute valid_until_ts from source_ts and horizon."""
+    source_dt = _parse_source_ts(source_ts)
+    valid_until_dt = source_dt + timedelta(minutes=horizon_minutes)
+    return valid_until_dt.isoformat()
+
 
 # Canonical float handling (FPDET-1)
 try:
@@ -88,12 +107,17 @@ def emit_intent(
     source_ts: str,
     tick_prices: Optional[List[float]] = None,
     use_real_kernel: bool = True,
+    horizon_minutes: int = DEFAULT_HORIZON_MINUTES,
+    exit_trigger: str = DEFAULT_EXIT_TRIGGER,
+    entry_basis_event_id: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
     """
     Append router.intent event to spine.
 
-    Uses quantized posture fields from allocator (v0.2 schema).
+    Uses quantized posture fields from allocator.
     VALIDATES before write - invalid intents become vetoes (fail closed).
+
+    v0.3: Requires expiry fields (valid_until_ts, horizon_minutes, exit_trigger, entry_basis_event_id).
 
     Args:
         spine_path: Path to event_spine.jsonl
@@ -103,12 +127,19 @@ def emit_intent(
         source_ts: Timestamp from source event
         tick_prices: Recent tick prices for real envelope (optional)
         use_real_kernel: If True and tick_prices provided, use bootstrap MC kernel
+        horizon_minutes: Validity horizon in minutes (v0.3 required)
+        exit_trigger: Exit condition (v0.3 required)
+        entry_basis_event_id: Event that granted authority (defaults to source_event_id)
 
     Returns:
         (success, error) - success=True if intent emitted, else error explains why
         On validation failure, a veto is emitted instead (fail closed).
     """
-    # Build payload with quantized fields (v0.2)
+    # Compute v0.3 expiry fields
+    valid_until_ts = _compute_valid_until(source_ts, horizon_minutes)
+    basis_event_id = entry_basis_event_id or source_event_id
+
+    # Build payload with quantized fields and v0.3 expiry
     payload = {
         "symbol": symbol,
         "direction": allocation.direction.value,
@@ -116,6 +147,12 @@ def emit_intent(
         "size_pct_scale": allocation.size_pct_scale,
         "risk_cap": allocation.risk_cap.value,
         "rationale": allocation.rationale,
+        # v0.3 required fields
+        "schema_version": INTENT_SCHEMA_VERSION,
+        "valid_until_ts": valid_until_ts,
+        "horizon_minutes": horizon_minutes,
+        "exit_trigger": exit_trigger,
+        "entry_basis_event_id": basis_event_id,
     }
 
     # Attach envelope - use real kernel if tick data available
@@ -127,12 +164,13 @@ def emit_intent(
         )
         payload["envelope"] = real_env.to_dict()
     else:
-        # Fallback to mock envelope
+        # Fallback to mock envelope with matching horizon
         envelope = make_mock_envelope(
             intent_side=allocation.direction.value,
             confidence=allocation.entropy_factor,
             vetoed=False,
             size=allocation.size_pct_q / allocation.size_pct_scale,
+            horizon_minutes=horizon_minutes,
         )
         payload["envelope"] = envelope.to_dict()
 
@@ -140,7 +178,7 @@ def emit_intent(
 
     # EMISSION BOUNDARY: Validate before write
     try:
-        validate_router_intent(payload)
+        validate_router_intent(payload, source_ts=source_ts)
     except ValueError as e:
         # Fail closed: emit veto instead of invalid intent
         _emit_surface_veto(
@@ -173,6 +211,9 @@ def emit_weak_intent(
     source_ts: str,
     tick_prices: Optional[List[float]] = None,
     use_real_kernel: bool = True,
+    horizon_minutes: int = DEFAULT_HORIZON_MINUTES,
+    exit_trigger: str = DEFAULT_EXIT_TRIGGER,
+    entry_basis_event_id: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
     """
     Append router.intent_weak event to spine.
@@ -186,6 +227,8 @@ def emit_weak_intent(
     - May update independently of strong intents
     - Scored by EVT-1 but not used for live execution
 
+    v0.3: Requires expiry fields (valid_until_ts, horizon_minutes, exit_trigger, entry_basis_event_id).
+
     Args:
         spine_path: Path to event_spine.jsonl
         symbol: Symbol identifier
@@ -194,12 +237,19 @@ def emit_weak_intent(
         source_ts: Timestamp from source event
         tick_prices: Recent tick prices for real envelope (optional)
         use_real_kernel: If True and tick_prices provided, use bootstrap MC kernel
+        horizon_minutes: Validity horizon in minutes (v0.3 required)
+        exit_trigger: Exit condition (v0.3 required)
+        entry_basis_event_id: Event that granted authority (defaults to source_event_id)
 
     Returns:
         (success, error) - success=True if intent emitted, else error explains why
         On validation failure, a veto is emitted instead (fail closed).
     """
-    # Build payload with quantized fields (v0.2)
+    # Compute v0.3 expiry fields
+    valid_until_ts = _compute_valid_until(source_ts, horizon_minutes)
+    basis_event_id = entry_basis_event_id or source_event_id
+
+    # Build payload with quantized fields and v0.3 expiry
     payload = {
         "symbol": symbol,
         "direction": allocation.direction.value,
@@ -208,6 +258,12 @@ def emit_weak_intent(
         "risk_cap": allocation.risk_cap.value,
         "rationale": allocation.rationale,
         "strength": "weak",  # Explicit marker
+        # v0.3 required fields
+        "schema_version": INTENT_SCHEMA_VERSION,
+        "valid_until_ts": valid_until_ts,
+        "horizon_minutes": horizon_minutes,
+        "exit_trigger": exit_trigger,
+        "entry_basis_event_id": basis_event_id,
     }
 
     # Attach envelope - use real kernel if tick data available
@@ -219,22 +275,21 @@ def emit_weak_intent(
         )
         payload["envelope"] = real_env.to_dict()
     else:
-        # Fallback to mock envelope
+        # Fallback to mock envelope with matching horizon
         envelope = make_mock_envelope(
             intent_side=allocation.direction.value,
             confidence=allocation.entropy_factor,
             vetoed=False,
             size=allocation.size_pct_q / allocation.size_pct_scale,
+            horizon_minutes=horizon_minutes,
         )
         payload["envelope"] = envelope.to_dict()
 
     payload = canonicalize_payload(payload, skip_unknown=True)
 
     # EMISSION BOUNDARY: Validate before write
-    # Note: We reuse router_intent validation for structure,
-    # the "strength" field is additional metadata
     try:
-        validate_router_intent(payload)
+        validate_router_intent(payload, source_ts=source_ts)
     except ValueError as e:
         # Fail closed: emit veto instead of invalid intent
         _emit_surface_veto(
@@ -268,6 +323,9 @@ def emit_shadow_intent(
     source_ts: str,
     tick_prices: Optional[List[float]] = None,
     use_real_kernel: bool = True,
+    horizon_minutes: int = DEFAULT_HORIZON_MINUTES,
+    exit_trigger: str = DEFAULT_EXIT_TRIGGER,
+    entry_basis_event_id: Optional[str] = None,
 ) -> bool:
     """
     Append router.intent_shadow event to spine.
@@ -276,6 +334,8 @@ def emit_shadow_intent(
     permitted. They are NOT actionable and carry explicit blocked_by tag.
 
     Purpose: Feed EVT-1 trials without granting real authority.
+
+    v0.3: Requires expiry fields (valid_until_ts, horizon_minutes, exit_trigger, entry_basis_event_id).
 
     Args:
         spine_path: Path to event_spine.jsonl
@@ -286,10 +346,17 @@ def emit_shadow_intent(
         source_ts: Timestamp from source event
         tick_prices: Recent tick prices for real envelope (optional)
         use_real_kernel: If True and tick_prices provided, use bootstrap MC kernel
+        horizon_minutes: Validity horizon in minutes (v0.3 required)
+        exit_trigger: Exit condition (v0.3 required)
+        entry_basis_event_id: Event that granted authority (defaults to source_event_id)
 
     Returns:
         True if written successfully, False on error
     """
+    # Compute v0.3 expiry fields
+    valid_until_ts = _compute_valid_until(source_ts, horizon_minutes)
+    basis_event_id = entry_basis_event_id or source_event_id
+
     payload = {
         "symbol": symbol,
         "direction": allocation.direction.value,
@@ -299,6 +366,12 @@ def emit_shadow_intent(
         "rationale": allocation.rationale,
         "blocked_by": blocked_by,
         "counterfactual": True,
+        # v0.3 required fields
+        "schema_version": INTENT_SCHEMA_VERSION,
+        "valid_until_ts": valid_until_ts,
+        "horizon_minutes": horizon_minutes,
+        "exit_trigger": exit_trigger,
+        "entry_basis_event_id": basis_event_id,
     }
 
     # Attach envelope - use real kernel if tick data available
@@ -310,12 +383,13 @@ def emit_shadow_intent(
         )
         payload["envelope"] = real_env.to_dict()
     else:
-        # Fallback to mock envelope
+        # Fallback to mock envelope with matching horizon
         envelope = make_mock_envelope(
             intent_side=allocation.direction.value,
             confidence=allocation.entropy_factor,
             vetoed=False,
             size=allocation.size_pct_q / allocation.size_pct_scale,
+            horizon_minutes=horizon_minutes,
         )
         payload["envelope"] = envelope.to_dict()
 

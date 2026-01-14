@@ -9,7 +9,8 @@ from .authority import (
     DemotionWatcher,
     bind_authority,
     create_build_meta_check,
-    create_violation_active_check,
+    create_severity_gated_violation_check,
+    create_violation_active_check,  # Deprecated
 )
 from .allocator import (
     Regime,
@@ -32,7 +33,8 @@ __all__ = [
     "DemotionWatcher",
     "bind_authority",
     "create_build_meta_check",
-    "create_violation_active_check",
+    "create_severity_gated_violation_check",
+    "create_violation_active_check",  # Deprecated
     # Allocator
     "Regime",
     "RiskCap",

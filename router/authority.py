@@ -349,12 +349,57 @@ class DemotionWatcher:
                 return
 
 
+def create_severity_gated_violation_check(
+    get_last_violation: Callable[[], tuple[Optional[str], Optional[str], Optional[str]]]
+) -> Callable[[], Optional[str]]:
+    """
+    Create a severity-gated demotion check for violations.
+
+    AUTHORITY POLICY (governance-layer decision):
+    - severity="critical" -> demote authority (system integrity breach)
+    - severity="warning" or other -> NO demotion (posture gate only)
+
+    This ensures network blips (warnings like missing_observation) don't nuke
+    authority, while true structural corruption (critical) still demotes.
+
+    Args:
+        get_last_violation: Callable returning (timestamp, severity, symbol)
+
+    Returns:
+        Check function for DemotionWatcher
+    """
+    _seen_critical_ts: list[Optional[str]] = [None]  # Track to avoid repeat triggers
+
+    def check() -> Optional[str]:
+        ts, severity, symbol = get_last_violation()
+
+        # No violation recorded -> no demotion
+        if ts is None:
+            return None
+
+        # Only critical severity triggers authority demotion
+        if severity == "critical":
+            # Avoid re-triggering on same violation
+            if ts != _seen_critical_ts[0]:
+                _seen_critical_ts[0] = ts
+                return f"critical_violation (symbol={symbol})"
+
+        # Non-critical (warning/info) -> no authority demotion
+        # These are handled via degraded_symbols posture gating in allocator
+        return None
+
+    return check
+
+
+# Legacy alias for backwards compatibility (deprecated)
 def create_violation_active_check(get_violation_active: Callable[[], bool]) -> Callable[[], Optional[str]]:
     """
-    Create a demotion check for violation_active state.
+    DEPRECATED: Use create_severity_gated_violation_check instead.
 
-    Per v0_1_to_v0_2.md: "violation_active becomes true" triggers demotion.
+    This legacy check treats ANY violation as authority-fatal, which causes
+    v0.2 to self-destruct on the first network blip (~108k warnings in spine).
     """
+    logger.warning("DEPRECATED: create_violation_active_check is obsolete. Use create_severity_gated_violation_check.")
 
     def check() -> Optional[str]:
         if get_violation_active():

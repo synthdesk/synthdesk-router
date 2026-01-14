@@ -17,6 +17,10 @@ from dataclasses import asdict, dataclass
 from typing import Any, Dict
 
 
+# Default horizon for mock envelopes (v0.3 constitutional)
+DEFAULT_HORIZON_MINUTES = 15
+
+
 @dataclass(frozen=True)
 class Envelope:
     """
@@ -24,6 +28,8 @@ class Envelope:
 
     Minimal v0: direction probs + sizing bands.
     Forward-compatible with quant_cortex tensor schema (8 channels).
+
+    v0.3: horizon_minutes is required. Envelope is only valid for this horizon.
     """
 
     # Direction probabilities (sum to 1.0 when not vetoed)
@@ -39,6 +45,10 @@ class Envelope:
     # Provenance for future parity with quant_cortex
     kernel: str = "mock_v0"
     version: str = "0.0.1"
+
+    # v0.3: Horizon binding (required)
+    # Envelope is calibrated for this horizon only
+    horizon_minutes: int = DEFAULT_HORIZON_MINUTES
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -65,6 +75,7 @@ def make_mock_envelope(
     confidence: float,
     vetoed: bool,
     size: float,
+    horizon_minutes: int = DEFAULT_HORIZON_MINUTES,
 ) -> Envelope:
     """
     Deterministic mock envelope.
@@ -74,6 +85,7 @@ def make_mock_envelope(
         confidence: [0, 1] - higher = more certain
         vetoed: If True, forces p_vetoed=1.0 and collapses sizing band
         size: Base size (will be banded by confidence)
+        horizon_minutes: Horizon this envelope is calibrated for (v0.3 required)
 
     Returns:
         Envelope with deterministic probability distribution and sizing bands.
@@ -94,6 +106,7 @@ def make_mock_envelope(
             p_vetoed=1.0,
             size_min=0.0,
             size_max=0.0,
+            horizon_minutes=horizon_minutes,
         )
 
     # Baseline: more confidence => less flat
@@ -125,4 +138,5 @@ def make_mock_envelope(
         p_vetoed=0.0,
         size_min=size_min,
         size_max=size_max,
+        horizon_minutes=horizon_minutes,
     )

@@ -86,5 +86,25 @@ def test_mock_envelope_to_dict_roundtrip():
     d = e.to_dict()
 
     assert isinstance(d, dict)
-    assert set(d.keys()) == {"p_flat", "p_long", "p_short", "p_vetoed", "size_min", "size_max", "kernel", "version"}
-    assert all(isinstance(v, (float, str)) for v in d.values())
+    expected_keys = {"p_flat", "p_long", "p_short", "p_vetoed", "size_min", "size_max", "kernel", "version", "horizon_minutes"}
+    assert set(d.keys()) == expected_keys
+    assert all(isinstance(v, (float, str, int)) for v in d.values())
+
+
+def test_mock_envelope_horizon_default():
+    """Envelope should have default horizon_minutes=15."""
+    e = make_mock_envelope(intent_side="LONG", confidence=0.5, vetoed=False, size=0.1)
+    assert e.horizon_minutes == 15
+
+
+def test_mock_envelope_horizon_custom():
+    """Envelope should accept custom horizon_minutes."""
+    e = make_mock_envelope(intent_side="LONG", confidence=0.5, vetoed=False, size=0.1, horizon_minutes=60)
+    assert e.horizon_minutes == 60
+
+
+def test_mock_envelope_vetoed_preserves_horizon():
+    """Vetoed envelope should still carry horizon_minutes."""
+    e = make_mock_envelope(intent_side="LONG", confidence=0.5, vetoed=True, size=0.1, horizon_minutes=30)
+    assert e.horizon_minutes == 30
+    assert e.p_vetoed == 1.0
