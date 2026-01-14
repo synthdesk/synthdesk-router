@@ -1,14 +1,25 @@
 """
-Envelope Provider - Bootstrap Monte Carlo Kernel (v0.2)
+Envelope Provider - Bootstrap Monte Carlo Kernel (v0.3)
 
 Computes probability envelopes from realized microstructure data.
 This is the first "real" kernel - deterministic, auditable, no model-fitting.
+
+EPISTEMIC CONTRACT (v0.3):
+- This kernel is NON-DIRECTIONAL. p_long and p_short are always 0.
+- It provides RISK/VETO signals only: p_vetoed, risk_p95, return_std.
+- Direction must come from a different kernel that passes EVT-0D.
+
+Why non-directional:
+- Bootstrap with replacement assumes i.i.d. returns (destroys serial correlation)
+- Terminal threshold exceedance != directional probability
+- EVT-0 showed 48% hit rate (noise) with flat calibration curve
+- Honest about what it can't do; useful for what it can (risk detection)
 
 Method: Historical bootstrapped returns
 - Take last N returns from tick window
 - Sample M paths by bootstrapping (with replacement)
 - Compute distribution of terminal return at each horizon
-- Map to probabilities
+- Use for volatility, tail risk, veto signals (NOT direction)
 
 Determinism: Seeded RNG from hash(symbol, source_event_id, kernel_build_sha)
 """
@@ -23,8 +34,11 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 # Kernel identity (frozen per release)
-KERNEL_VERSION = "bootstrap_mc_v0.2"
-KERNEL_BUILD_SHA = "bootstrap_mc_v0.2.1_20260112"  # Update on code changes (v0.2.1: asof_ts fix)
+KERNEL_VERSION = "bootstrap_mc_v0.3"
+KERNEL_BUILD_SHA = "bootstrap_mc_v0.3.0_20260114"  # v0.3: non-directional, risk-only
+
+# Epistemic contract flag
+KERNEL_DIRECTIONAL = False  # This kernel does NOT claim directional signal
 
 
 @dataclass(frozen=True)
@@ -50,9 +64,9 @@ class BootstrapParams:
 class Envelope:
     """Probability envelope from MC simulation."""
 
-    p_long: float       # P(R > long_threshold)
-    p_short: float      # P(R < short_threshold)
-    p_flat: float       # 1 - p_long - p_short
+    p_long: float       # P(R > long_threshold) - always 0 for non-directional kernels
+    p_short: float      # P(R < short_threshold) - always 0 for non-directional kernels
+    p_flat: float       # 1 - p_vetoed for non-directional kernels
     p_vetoed: float     # Veto probability (tail risk / insufficient data)
 
     risk_p95: float     # 95th percentile of loss
@@ -66,6 +80,9 @@ class Envelope:
     params_hash: str
     seed: int
     n_returns_used: int
+
+    # Epistemic contract
+    directional: bool = False  # Does this kernel claim directional signal?
 
     def to_dict(self) -> Dict:
         """Convert to dict for serialization."""
@@ -83,6 +100,7 @@ class Envelope:
             "params_hash": self.params_hash,
             "seed": self.seed,
             "n_returns_used": self.n_returns_used,
+            "directional": self.directional,
         }
 
 
@@ -182,7 +200,7 @@ def make_envelope(
 
     # Check minimum data requirement
     if n_returns_available < params.min_returns:
-        # Insufficient data: veto
+        # Insufficient data: full veto
         return Envelope(
             p_long=0.0,
             p_short=0.0,
@@ -197,6 +215,7 @@ def make_envelope(
             params_hash=params_hash,
             seed=seed,
             n_returns_used=n_returns_available,
+            directional=KERNEL_DIRECTIONAL,
         )
 
     # Use most recent N returns
@@ -217,19 +236,11 @@ def make_envelope(
     # Terminal returns (last column)
     terminal_returns = paths[:, -1]
 
-    # Convert log returns to simple returns for probability calculation
+    # Convert log returns to simple returns for risk calculation
     # exp(log_return) - 1 ≈ simple_return for small returns
     simple_terminal = np.expm1(terminal_returns)
 
-    # Compute probabilities
-    p_long = float(np.mean(simple_terminal > params.long_threshold))
-    p_short = float(np.mean(simple_terminal < params.short_threshold))
-    p_flat = 1.0 - p_long - p_short
-
-    # Ensure non-negative
-    p_flat = max(0.0, p_flat)
-
-    # Risk metrics
+    # Risk metrics (this is what bootstrap_mc is actually valid for)
     expected_return = float(np.mean(simple_terminal))
     return_std = float(np.std(simple_terminal))
 
@@ -238,22 +249,31 @@ def make_envelope(
     losses = -simple_terminal  # Negate so positive = loss
     risk_p95 = float(np.percentile(losses, params.risk_quantile * 100))
 
-    # Veto heuristic: high uncertainty or extreme tail risk
-    # p_vetoed indicates confidence in veto
+    # Veto heuristic: based on RISK, not direction
+    # p_vetoed indicates tail risk / uncertainty
     p_vetoed = 0.0
 
-    # High uncertainty: both directions equally likely
-    if abs(p_long - p_short) < 0.1 and max(p_long, p_short) > 0.4:
-        p_vetoed = 0.3  # Moderate veto signal
+    # High volatility regime
+    if return_std > 0.005:  # >0.5% std over horizon
+        p_vetoed = 0.3
 
     # Extreme tail risk
     if risk_p95 > 0.02:  # >2% potential loss at p95
         p_vetoed = max(p_vetoed, 0.5)
 
+    # Very high tail risk
+    if risk_p95 > 0.03:  # >3% potential loss at p95
+        p_vetoed = max(p_vetoed, 0.7)
+
+    # EPISTEMIC CONTRACT: No directional claims
+    # p_long = p_short = 0; p_flat = 1 - p_vetoed
+    # Bootstrap i.i.d. assumption destroys serial correlation,
+    # making directional predictions no better than random (EVT-0 verified)
+
     return Envelope(
-        p_long=p_long,
-        p_short=p_short,
-        p_flat=p_flat,
+        p_long=0.0,         # NO DIRECTIONAL CLAIM
+        p_short=0.0,        # NO DIRECTIONAL CLAIM
+        p_flat=1.0 - p_vetoed,
         p_vetoed=p_vetoed,
         risk_p95=risk_p95,
         expected_return=expected_return,
@@ -264,6 +284,7 @@ def make_envelope(
         params_hash=params_hash,
         seed=seed,
         n_returns_used=n_returns_used,
+        directional=KERNEL_DIRECTIONAL,
     )
 
 
