@@ -107,6 +107,21 @@ class RouterState:
                         self.symbols[symbol]["regime_confidence"] = float(confidence)
                     except (TypeError, ValueError):
                         pass
+                # Store regime metrics for momentum kernel (z_mean is directional signal)
+                metrics = payload.get("metrics")
+                if isinstance(metrics, dict):
+                    z_mean = metrics.get("z_mean")
+                    z_std = metrics.get("z_std")
+                    if z_mean is not None:
+                        try:
+                            self.symbols[symbol]["z_mean"] = float(z_mean)
+                        except (TypeError, ValueError):
+                            pass
+                    if z_std is not None:
+                        try:
+                            self.symbols[symbol]["z_std"] = float(z_std)
+                        except (TypeError, ValueError):
+                            pass
                 # Auto-recovery: successful regime emission clears degraded status
                 self._degraded_symbols.discard(symbol)
 
@@ -130,6 +145,36 @@ class RouterState:
             Regime string or None if unresolved
         """
         return self.symbols.get(symbol, {}).get("regime")
+
+    def get_z_mean(self, symbol: str) -> Optional[float]:
+        """
+        Get z_mean (normalized drift) for symbol.
+
+        This is the directional signal from regime classification.
+        Positive z_mean indicates upward drift, negative indicates downward.
+
+        Args:
+            symbol: Symbol identifier
+
+        Returns:
+            z_mean float or None if unavailable
+        """
+        return self.symbols.get(symbol, {}).get("z_mean")
+
+    def get_z_std(self, symbol: str) -> Optional[float]:
+        """
+        Get z_std (normalized volatility) for symbol.
+
+        This indicates realized volatility relative to EWMA baseline.
+        Values ~1.0 are normal; higher values indicate elevated volatility.
+
+        Args:
+            symbol: Symbol identifier
+
+        Returns:
+            z_std float or None if unavailable
+        """
+        return self.symbols.get(symbol, {}).get("z_std")
 
     def get_last_intent(self, symbol: str) -> Optional[Dict]:
         """

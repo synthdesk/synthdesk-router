@@ -33,9 +33,23 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from .momentum_kernel import (
+    MomentumEnvelope,
+    MomentumParams,
+    make_momentum_envelope,
+    KERNEL_NAME as MOMENTUM_KERNEL_NAME,
+    KERNEL_VERSION as MOMENTUM_KERNEL_VERSION,
+    KERNEL_BUILD_SHA as MOMENTUM_KERNEL_BUILD_SHA,
+    KERNEL_DIRECTIONAL as MOMENTUM_KERNEL_DIRECTIONAL,
+)
+
 # Kernel identity (frozen per release)
 KERNEL_VERSION = "bootstrap_mc_v0.3"
 KERNEL_BUILD_SHA = "bootstrap_mc_v0.3.0_20260114"  # v0.3: non-directional, risk-only
+
+# Composite kernel identity
+COMPOSITE_KERNEL_VERSION = "composite_v0.1"
+COMPOSITE_KERNEL_BUILD_SHA = "composite_v0.1.0_20260114"
 
 # Epistemic contract flag
 KERNEL_DIRECTIONAL = False  # This kernel does NOT claim directional signal
@@ -285,6 +299,172 @@ def make_envelope(
         seed=seed,
         n_returns_used=n_returns_used,
         directional=KERNEL_DIRECTIONAL,
+    )
+
+
+# ---------------------------------------------------------------------
+# Composite Envelope: momentum_v0 (direction) + bootstrap_mc (risk)
+# ---------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class CompositeEnvelope:
+    """
+    Composite envelope combining multiple kernels.
+
+    Direction from: momentum_v0 (EVT-0D validated)
+    Risk from: bootstrap_mc v0.3 (EVT-0R validated)
+
+    Policy: Only emit directional signal if momentum_v0 claims direction.
+    Risk signal (p_vetoed) comes from bootstrap_mc regardless.
+    """
+
+    # Direction probabilities (from momentum_v0)
+    p_long: float
+    p_short: float
+    p_flat: float
+
+    # Risk/veto (from bootstrap_mc v0.3)
+    p_vetoed: float
+    risk_p95: float
+    return_std: float
+
+    # Epistemic contract
+    directional: bool  # True only if momentum_v0 claims direction
+
+    # Provenance: composite kernel
+    kernel: str
+    kernel_version: str
+    kernel_build_sha: str
+
+    # Provenance: direction source
+    direction_kernel: str
+    direction_kernel_version: str
+    direction_kernel_build_sha: str
+
+    # Provenance: risk source
+    risk_kernel: str
+    risk_kernel_version: str
+    risk_kernel_build_sha: str
+
+    # Input signals (for audit)
+    z_mean: float
+    z_std: float
+    regime: str
+
+    def to_dict(self) -> Dict:
+        """Convert to dict for serialization."""
+        return {
+            "p_long": self.p_long,
+            "p_short": self.p_short,
+            "p_flat": self.p_flat,
+            "p_vetoed": self.p_vetoed,
+            "risk_p95": self.risk_p95,
+            "return_std": self.return_std,
+            "directional": self.directional,
+            "kernel": self.kernel,
+            "kernel_version": self.kernel_version,
+            "kernel_build_sha": self.kernel_build_sha,
+            "direction_kernel": self.direction_kernel,
+            "direction_kernel_version": self.direction_kernel_version,
+            "direction_kernel_build_sha": self.direction_kernel_build_sha,
+            "risk_kernel": self.risk_kernel,
+            "risk_kernel_version": self.risk_kernel_version,
+            "risk_kernel_build_sha": self.risk_kernel_build_sha,
+            "z_mean": self.z_mean,
+            "z_std": self.z_std,
+            "regime": self.regime,
+        }
+
+
+def make_composite_envelope(
+    symbol: str,
+    prices: List[float],
+    source_event_id: str,
+    z_mean: Optional[float],
+    z_std: Optional[float],
+    regime: Optional[str],
+    bootstrap_params: Optional[BootstrapParams] = None,
+    momentum_params: Optional[MomentumParams] = None,
+) -> CompositeEnvelope:
+    """
+    Create composite envelope combining direction and risk signals.
+
+    Direction: momentum_v0 kernel (from z_mean drift signal)
+    Risk: bootstrap_mc v0.3 kernel (from price volatility)
+
+    The composite envelope:
+    - p_long/p_short/p_flat: from momentum_v0 if directional, else 0/0/1
+    - p_vetoed: from bootstrap_mc (risk signal)
+    - risk_p95/return_std: from bootstrap_mc
+    - directional: True only if momentum_v0 claims direction
+
+    Args:
+        symbol: Symbol identifier
+        prices: Recent price history for bootstrap_mc
+        source_event_id: Event ID for deterministic seeding
+        z_mean: Normalized drift from regime classifier (for momentum_v0)
+        z_std: Normalized volatility (for momentum_v0)
+        regime: Current regime label (for momentum_v0)
+        bootstrap_params: Parameters for bootstrap_mc
+        momentum_params: Parameters for momentum_v0
+
+    Returns:
+        CompositeEnvelope with direction + risk signals
+    """
+    # Get risk signal from bootstrap_mc
+    risk_envelope = make_envelope(
+        symbol=symbol,
+        prices=prices,
+        source_event_id=source_event_id,
+        params=bootstrap_params,
+    )
+
+    # Get direction signal from momentum_v0
+    # Pass p_vetoed from bootstrap_mc to scale directional mass
+    momentum_envelope = make_momentum_envelope(
+        symbol=symbol,
+        z_mean=z_mean,
+        z_std=z_std,
+        regime=regime,
+        p_vetoed=risk_envelope.p_vetoed,
+        params=momentum_params,
+    )
+
+    # Combine: direction from momentum, risk from bootstrap
+    if momentum_envelope.directional:
+        # momentum_v0 claims direction - use its probabilities
+        # Note: momentum_envelope already scaled by p_vetoed
+        p_long = momentum_envelope.p_long
+        p_short = momentum_envelope.p_short
+        p_flat = momentum_envelope.p_flat
+        directional = True
+    else:
+        # No directional claim - stay flat
+        p_long = 0.0
+        p_short = 0.0
+        p_flat = 1.0 - risk_envelope.p_vetoed
+        directional = False
+
+    return CompositeEnvelope(
+        p_long=p_long,
+        p_short=p_short,
+        p_flat=p_flat,
+        p_vetoed=risk_envelope.p_vetoed,
+        risk_p95=risk_envelope.risk_p95,
+        return_std=risk_envelope.return_std,
+        directional=directional,
+        kernel="composite",
+        kernel_version=COMPOSITE_KERNEL_VERSION,
+        kernel_build_sha=COMPOSITE_KERNEL_BUILD_SHA,
+        direction_kernel=MOMENTUM_KERNEL_NAME,
+        direction_kernel_version=MOMENTUM_KERNEL_VERSION,
+        direction_kernel_build_sha=MOMENTUM_KERNEL_BUILD_SHA,
+        risk_kernel="bootstrap_mc",
+        risk_kernel_version=KERNEL_VERSION,
+        risk_kernel_build_sha=KERNEL_BUILD_SHA,
+        z_mean=z_mean if z_mean is not None else 0.0,
+        z_std=z_std if z_std is not None else 0.0,
+        regime=regime if regime is not None else "unknown",
     )
 
 

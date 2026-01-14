@@ -431,6 +431,11 @@ def run_runtime(
             else:
                 tick_prices = None
 
+            # Get z_mean/z_std/regime for composite envelope (momentum_v0 direction)
+            z_mean = router_state.get_z_mean(symbol)
+            z_std = router_state.get_z_std(symbol)
+            regime = router_state.get_regime(symbol)
+
             if isinstance(result, VetoReason):
                 # Veto path: typed silence (always permitted)
                 last_veto = router_state.get_last_veto_reason(symbol)
@@ -459,6 +464,9 @@ def run_runtime(
                         source_ts=timestamp,
                         tick_prices=tick_prices,
                         use_real_kernel=use_real_kernel,
+                        z_mean=z_mean,
+                        z_std=z_std,
+                        regime=regime,
                     )
                     # NOTE: Do NOT update router_state.set_last_allocation()
                     # Weak intents track independently from strong intents
@@ -480,6 +488,9 @@ def run_runtime(
                             source_ts=timestamp,
                             tick_prices=tick_prices,
                             use_real_kernel=use_real_kernel,
+                            z_mean=z_mean,
+                            z_std=z_std,
+                            regime=regime,
                         )
                         router_state.set_last_allocation(symbol, result)
 
@@ -505,6 +516,9 @@ def run_runtime(
                         source_ts=timestamp,
                         tick_prices=tick_prices,
                         use_real_kernel=use_real_kernel,
+                        z_mean=z_mean,
+                        z_std=z_std,
+                        regime=regime,
                     )
                     router_state.set_last_allocation(symbol, result)
 

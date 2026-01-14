@@ -22,6 +22,12 @@ if TYPE_CHECKING:
 from router.envelope import DEFAULT_HORIZON_MINUTES, make_mock_envelope
 from router.envelope_provider import Envelope as RealEnvelope
 from router.envelope_provider import make_envelope as make_real_envelope
+from router.envelope_provider import (
+    CompositeEnvelope,
+    make_composite_envelope,
+    COMPOSITE_KERNEL_VERSION,
+    COMPOSITE_KERNEL_BUILD_SHA,
+)
 from schemas.router_intent import INTENT_SCHEMA_VERSION, validate_router_intent
 
 logger = logging.getLogger(__name__)
@@ -110,6 +116,9 @@ def emit_intent(
     horizon_minutes: int = DEFAULT_HORIZON_MINUTES,
     exit_trigger: str = DEFAULT_EXIT_TRIGGER,
     entry_basis_event_id: Optional[str] = None,
+    z_mean: Optional[float] = None,
+    z_std: Optional[float] = None,
+    regime: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
     """
     Append router.intent event to spine.
@@ -118,6 +127,7 @@ def emit_intent(
     VALIDATES before write - invalid intents become vetoes (fail closed).
 
     v0.3: Requires expiry fields (valid_until_ts, horizon_minutes, exit_trigger, entry_basis_event_id).
+    v0.4: Uses composite envelope (momentum_v0 direction + bootstrap_mc risk) when z_mean available.
 
     Args:
         spine_path: Path to event_spine.jsonl
@@ -130,6 +140,9 @@ def emit_intent(
         horizon_minutes: Validity horizon in minutes (v0.3 required)
         exit_trigger: Exit condition (v0.3 required)
         entry_basis_event_id: Event that granted authority (defaults to source_event_id)
+        z_mean: Normalized drift from regime classifier (for momentum_v0 direction)
+        z_std: Normalized volatility (for momentum_v0)
+        regime: Current regime label (for momentum_v0)
 
     Returns:
         (success, error) - success=True if intent emitted, else error explains why
@@ -155,14 +168,18 @@ def emit_intent(
         "entry_basis_event_id": basis_event_id,
     }
 
-    # Attach envelope - use real kernel if tick data available
+    # Attach envelope - use composite kernel (momentum_v0 + bootstrap_mc) when z_mean available
     if use_real_kernel and tick_prices and len(tick_prices) >= 100:
-        real_env = make_real_envelope(
+        # Use composite envelope: direction from momentum_v0, risk from bootstrap_mc
+        composite_env = make_composite_envelope(
             symbol=symbol,
             prices=tick_prices,
             source_event_id=source_event_id,
+            z_mean=z_mean,
+            z_std=z_std,
+            regime=regime,
         )
-        payload["envelope"] = real_env.to_dict()
+        payload["envelope"] = composite_env.to_dict()
     else:
         # Fallback to mock envelope with matching horizon
         envelope = make_mock_envelope(
@@ -214,6 +231,9 @@ def emit_weak_intent(
     horizon_minutes: int = DEFAULT_HORIZON_MINUTES,
     exit_trigger: str = DEFAULT_EXIT_TRIGGER,
     entry_basis_event_id: Optional[str] = None,
+    z_mean: Optional[float] = None,
+    z_std: Optional[float] = None,
+    regime: Optional[str] = None,
 ) -> Tuple[bool, Optional[str]]:
     """
     Append router.intent_weak event to spine.
@@ -228,6 +248,7 @@ def emit_weak_intent(
     - Scored by EVT-1 but not used for live execution
 
     v0.3: Requires expiry fields (valid_until_ts, horizon_minutes, exit_trigger, entry_basis_event_id).
+    v0.4: Uses composite envelope (momentum_v0 direction + bootstrap_mc risk) when z_mean available.
 
     Args:
         spine_path: Path to event_spine.jsonl
@@ -240,6 +261,9 @@ def emit_weak_intent(
         horizon_minutes: Validity horizon in minutes (v0.3 required)
         exit_trigger: Exit condition (v0.3 required)
         entry_basis_event_id: Event that granted authority (defaults to source_event_id)
+        z_mean: Normalized drift from regime classifier (for momentum_v0 direction)
+        z_std: Normalized volatility (for momentum_v0)
+        regime: Current regime label (for momentum_v0)
 
     Returns:
         (success, error) - success=True if intent emitted, else error explains why
@@ -266,14 +290,18 @@ def emit_weak_intent(
         "entry_basis_event_id": basis_event_id,
     }
 
-    # Attach envelope - use real kernel if tick data available
+    # Attach envelope - use composite kernel (momentum_v0 + bootstrap_mc) when z_mean available
     if use_real_kernel and tick_prices and len(tick_prices) >= 100:
-        real_env = make_real_envelope(
+        # Use composite envelope: direction from momentum_v0, risk from bootstrap_mc
+        composite_env = make_composite_envelope(
             symbol=symbol,
             prices=tick_prices,
             source_event_id=source_event_id,
+            z_mean=z_mean,
+            z_std=z_std,
+            regime=regime,
         )
-        payload["envelope"] = real_env.to_dict()
+        payload["envelope"] = composite_env.to_dict()
     else:
         # Fallback to mock envelope with matching horizon
         envelope = make_mock_envelope(
@@ -326,6 +354,9 @@ def emit_shadow_intent(
     horizon_minutes: int = DEFAULT_HORIZON_MINUTES,
     exit_trigger: str = DEFAULT_EXIT_TRIGGER,
     entry_basis_event_id: Optional[str] = None,
+    z_mean: Optional[float] = None,
+    z_std: Optional[float] = None,
+    regime: Optional[str] = None,
 ) -> bool:
     """
     Append router.intent_shadow event to spine.
@@ -336,6 +367,7 @@ def emit_shadow_intent(
     Purpose: Feed EVT-1 trials without granting real authority.
 
     v0.3: Requires expiry fields (valid_until_ts, horizon_minutes, exit_trigger, entry_basis_event_id).
+    v0.4: Uses composite envelope (momentum_v0 direction + bootstrap_mc risk) when z_mean available.
 
     Args:
         spine_path: Path to event_spine.jsonl
@@ -349,6 +381,9 @@ def emit_shadow_intent(
         horizon_minutes: Validity horizon in minutes (v0.3 required)
         exit_trigger: Exit condition (v0.3 required)
         entry_basis_event_id: Event that granted authority (defaults to source_event_id)
+        z_mean: Normalized drift from regime classifier (for momentum_v0 direction)
+        z_std: Normalized volatility (for momentum_v0)
+        regime: Current regime label (for momentum_v0)
 
     Returns:
         True if written successfully, False on error
@@ -374,14 +409,18 @@ def emit_shadow_intent(
         "entry_basis_event_id": basis_event_id,
     }
 
-    # Attach envelope - use real kernel if tick data available
+    # Attach envelope - use composite kernel (momentum_v0 + bootstrap_mc) when z_mean available
     if use_real_kernel and tick_prices and len(tick_prices) >= 100:
-        real_env = make_real_envelope(
+        # Use composite envelope: direction from momentum_v0, risk from bootstrap_mc
+        composite_env = make_composite_envelope(
             symbol=symbol,
             prices=tick_prices,
             source_event_id=source_event_id,
+            z_mean=z_mean,
+            z_std=z_std,
+            regime=regime,
         )
-        payload["envelope"] = real_env.to_dict()
+        payload["envelope"] = composite_env.to_dict()
     else:
         # Fallback to mock envelope with matching horizon
         envelope = make_mock_envelope(
