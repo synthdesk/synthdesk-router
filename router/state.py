@@ -176,6 +176,18 @@ class RouterState:
         """
         return self.symbols.get(symbol, {}).get("z_std")
 
+    def get_regime_confidence(self, symbol: str) -> Optional[float]:
+        """
+        Get regime confidence for symbol.
+
+        Args:
+            symbol: Symbol identifier
+
+        Returns:
+            Regime confidence float or None if unavailable
+        """
+        return self.symbols.get(symbol, {}).get("regime_confidence")
+
     def get_last_intent(self, symbol: str) -> Optional[Dict]:
         """
         Get last emitted intent for symbol (for dedup).
