@@ -9,6 +9,7 @@ v0.3: All intents require expiry fields (valid_until_ts, horizon_minutes, exit_t
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from datetime import datetime, timedelta, timezone
@@ -103,6 +104,13 @@ def _write_event(spine_path: Path, event: Dict) -> bool:
         return True
     except OSError:
         return False
+
+
+def _compute_intent_id(payload: Dict, source_event_id: str) -> str:
+    """Compute deterministic intent_id from payload + source_event_id."""
+    payload_str = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    digest = hashlib.sha256((source_event_id + payload_str).encode("utf-8")).hexdigest()
+    return digest
 
 
 def _emit_surface_veto(
@@ -225,6 +233,10 @@ def emit_intent(
         )
         payload["envelope"] = envelope.to_dict()
 
+    # Binding provenance (payload-level, deterministic)
+    payload["source_event_id"] = source_event_id
+    payload["source_ts"] = source_ts
+
     payload = canonicalize_payload(payload, skip_unknown=True)
 
     # EMISSION BOUNDARY: Validate before write
@@ -240,6 +252,8 @@ def emit_intent(
             source_ts=source_ts,
         )
         return (False, f"surface_invalid: {e}")
+
+    payload["intent_id"] = _compute_intent_id(payload, source_event_id)
 
     event = {
         "event_type": "router.intent",
@@ -349,6 +363,10 @@ def emit_weak_intent(
         )
         payload["envelope"] = envelope.to_dict()
 
+    # Binding provenance (payload-level, deterministic)
+    payload["source_event_id"] = source_event_id
+    payload["source_ts"] = source_ts
+
     payload = canonicalize_payload(payload, skip_unknown=True)
 
     # EMISSION BOUNDARY: Validate before write
@@ -364,6 +382,8 @@ def emit_weak_intent(
             source_ts=source_ts,
         )
         return (False, f"surface_invalid: {e}")
+
+    payload["intent_id"] = _compute_intent_id(payload, source_event_id)
 
     event = {
         "event_type": "router.intent_weak",
@@ -470,7 +490,13 @@ def emit_shadow_intent(
         )
         payload["envelope"] = envelope.to_dict()
 
+    # Binding provenance (payload-level, deterministic)
+    payload["source_event_id"] = source_event_id
+    payload["source_ts"] = source_ts
+
     payload = canonicalize_payload(payload, skip_unknown=True)
+
+    payload["intent_id"] = _compute_intent_id(payload, source_event_id)
 
     event = {
         "event_type": "router.intent_shadow",
