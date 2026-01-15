@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import sys
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
@@ -43,6 +45,25 @@ DIRECTIONAL_REGIMES = {"drift", "breakout"}
 # Optimal range: |z_mean| in [0.00002, 0.00003)
 Z_DRIFT_MIN = 0.00002     # Below this: regime classifier threshold, weak signal
 Z_DRIFT_MAX = 0.00003     # Above this: mean reversion dominates (hit rate <50%)
+
+# Analysis-only debug logging (opt-in via env var)
+_DEBUG_ENV_VAR = "SYNTHDESK_MOMENTUM_DEBUG"
+
+
+def _debug_enabled() -> bool:
+    value = os.getenv(_DEBUG_ENV_VAR, "")
+    return value.lower() in ("1", "true", "yes", "on")
+
+
+def _emit_debug(payload: Dict[str, object]) -> None:
+    if not _debug_enabled():
+        return
+    payload["debug_version"] = "momentum_v0_debug_v1"
+    try:
+        print(json.dumps(payload, sort_keys=True), file=sys.stderr, flush=True)
+    except Exception:
+        # Debug logging must never affect behavior
+        return
 
 
 @dataclass(frozen=True)
@@ -162,6 +183,7 @@ def make_momentum_envelope(
     z_mean: Optional[float],
     z_std: Optional[float],
     regime: Optional[str],
+    regime_confidence: Optional[float] = None,
     p_vetoed: float = 0.0,
     params: Optional[MomentumParams] = None,
 ) -> MomentumEnvelope:
@@ -203,16 +225,53 @@ def make_momentum_envelope(
             directional=False,
         )
 
-    # Gate 1: Regime must be directional
-    if regime_val.lower() not in DIRECTIONAL_REGIMES:
-        return _non_directional()
-
-    # Gate 2: |z_mean| must be in goldilocks zone [min, max)
+    in_directional_regime = regime_val.lower() in DIRECTIONAL_REGIMES
     abs_z_mean = abs(z_mean_val)
     confidence = _lookup_confidence(abs_z_mean, params)
 
+    # Gate 1: Regime must be directional
+    if not in_directional_regime:
+        _emit_debug({
+            "symbol": symbol,
+            "regime": regime_val,
+            "regime_confidence": regime_confidence,
+            "z_mean": z_mean_val,
+            "z_std": z_std_val,
+            "abs_z_mean": abs_z_mean,
+            "z_drift_min": params.z_drift_min,
+            "z_drift_max": params.z_drift_max,
+            "max_confidence": params.max_confidence,
+            "min_confidence": params.min_confidence,
+            "p_vetoed": p_vetoed,
+            "in_directional_regime": in_directional_regime,
+            "in_goldilocks": False,
+            "confidence": confidence,
+            "decision": "non_directional",
+            "reason": "regime_gate",
+        })
+        return _non_directional()
+
+    # Gate 2: |z_mean| must be in goldilocks zone [min, max)
     if confidence == 0.0:
         # Outside valid zone (too weak OR mean reversion zone)
+        _emit_debug({
+            "symbol": symbol,
+            "regime": regime_val,
+            "regime_confidence": regime_confidence,
+            "z_mean": z_mean_val,
+            "z_std": z_std_val,
+            "abs_z_mean": abs_z_mean,
+            "z_drift_min": params.z_drift_min,
+            "z_drift_max": params.z_drift_max,
+            "max_confidence": params.max_confidence,
+            "min_confidence": params.min_confidence,
+            "p_vetoed": p_vetoed,
+            "in_directional_regime": in_directional_regime,
+            "in_goldilocks": False,
+            "confidence": confidence,
+            "decision": "non_directional",
+            "reason": "z_mean_gate",
+        })
         return _non_directional()
 
     # Directional claim!
@@ -226,10 +285,33 @@ def make_momentum_envelope(
         p_short = confidence
 
     # Normalize with veto (reduce directional mass proportionally)
+    pre_scale = {"p_long": p_long, "p_short": p_short}
+    scale = 1.0 - p_vetoed
     if p_vetoed > 0:
-        scale = 1.0 - p_vetoed
         p_long *= scale
         p_short *= scale
+
+    _emit_debug({
+        "symbol": symbol,
+        "regime": regime_val,
+        "regime_confidence": regime_confidence,
+        "z_mean": z_mean_val,
+        "z_std": z_std_val,
+        "abs_z_mean": abs_z_mean,
+        "z_drift_min": params.z_drift_min,
+        "z_drift_max": params.z_drift_max,
+        "max_confidence": params.max_confidence,
+        "min_confidence": params.min_confidence,
+        "p_vetoed": p_vetoed,
+        "scale": scale,
+        "pre_scale": pre_scale,
+        "post_scale": {"p_long": p_long, "p_short": p_short},
+        "in_directional_regime": in_directional_regime,
+        "in_goldilocks": True,
+        "confidence": confidence,
+        "decision": "directional",
+        "reason": "goldilocks",
+    })
 
     return MomentumEnvelope(
         p_long=p_long,

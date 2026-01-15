@@ -383,6 +383,7 @@ def make_composite_envelope(
     z_mean: Optional[float],
     z_std: Optional[float],
     regime: Optional[str],
+    regime_confidence: Optional[float] = None,
     bootstrap_params: Optional[BootstrapParams] = None,
     momentum_params: Optional[MomentumParams] = None,
 ) -> CompositeEnvelope:
@@ -405,6 +406,7 @@ def make_composite_envelope(
         z_mean: Normalized drift from regime classifier (for momentum_v0)
         z_std: Normalized volatility (for momentum_v0)
         regime: Current regime label (for momentum_v0)
+        regime_confidence: Regime classifier confidence (analysis-only logging)
         bootstrap_params: Parameters for bootstrap_mc
         momentum_params: Parameters for momentum_v0
 
@@ -426,6 +428,7 @@ def make_composite_envelope(
         z_mean=z_mean,
         z_std=z_std,
         regime=regime,
+        regime_confidence=regime_confidence,
         p_vetoed=risk_envelope.p_vetoed,
         params=momentum_params,
     )

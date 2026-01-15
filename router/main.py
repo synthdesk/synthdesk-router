@@ -18,6 +18,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -36,7 +37,7 @@ from router.constraints import (
     evaluate_constraints_with_strength,
     should_emit_intent,
 )
-from router.emit import emit_intent, emit_shadow_intent, emit_veto, emit_weak_intent
+from router.emit import emit_intent, emit_shadow_intent, emit_veto, emit_weak_intent, emit_heartbeat, set_router_build_sha, set_soak_contract_hash
 from router.envelope_provider import TickBuffer
 from router.spine_reader import SpineReader
 from router.state import RouterState
@@ -349,6 +350,7 @@ def run_runtime(
     authority_state: AuthorityState,
     demotions_path: Optional[Path] = None,
     use_real_kernel: bool = True,
+    heartbeat_interval: float = 30.0,
 ) -> None:
     """
     Long-running router runtime with authority gating.
@@ -359,6 +361,7 @@ def run_runtime(
         authority_state: Bound authority state
         demotions_path: Path for durable demotion recording
         use_real_kernel: If True, use bootstrap MC kernel (requires tick data)
+        heartbeat_interval: Seconds between heartbeat emissions
     """
     # Pass promoted_at as authority epoch: violations before this timestamp
     # cannot demote the current authority binding (they belong to a prior epoch)
@@ -371,13 +374,41 @@ def run_runtime(
     runs_dir = spine_path.parent  # Assume spine is in runs/0.2.0/
     tick_watcher = TickWatcher(runs_dir, tick_buffer)
 
+    # Heartbeat state
+    last_heartbeat_time = time.time()
+    events_consumed = 0
+    intents_emitted = 0
+    vetoes_emitted = 0
+    shadows_emitted = 0
+    last_event_ts: Optional[str] = None
+
     print(f"router v{ROUTER_VERSION} runtime started", file=sys.stderr, flush=True)
     print(f"authority_level: {authority_state.level}", file=sys.stderr, flush=True)
     print(f"spine: {spine_path}", file=sys.stderr, flush=True)
     print(f"poll: {poll_interval}s", file=sys.stderr, flush=True)
     print(f"real_kernel: {use_real_kernel}", file=sys.stderr, flush=True)
+    print(f"heartbeat_interval: {heartbeat_interval}s", file=sys.stderr, flush=True)
 
-    for event in reader.tail(skip_existing=False):
+    for event in reader.tail_with_heartbeat(skip_existing=False):
+        # Check if heartbeat is due
+        now = time.time()
+        if now - last_heartbeat_time >= heartbeat_interval:
+            emit_heartbeat(
+                spine_path=spine_path,
+                authority_level=str(authority_state.level),
+                spine_offset=reader.offset,
+                events_consumed=events_consumed,
+                intents_emitted=intents_emitted,
+                vetoes_emitted=vetoes_emitted,
+                shadows_emitted=shadows_emitted,
+                last_event_ts=last_event_ts,
+            )
+            last_heartbeat_time = now
+
+        # None means poll cycle with no events - continue to next cycle
+        if event is None:
+            continue
+
         # Poll ticks on each iteration (cheap if no new data)
         tick_watcher.poll_ticks()
 
@@ -389,6 +420,11 @@ def run_runtime(
         # Filter: only consume allowed event types
         if event_type not in ALLOWED_EVENT_TYPES:
             continue
+
+        # Track event consumption for heartbeat
+        events_consumed += 1
+        if isinstance(timestamp, str):
+            last_event_ts = timestamp
 
         # Update state from event
         router_state.update_from_event(event)
@@ -435,6 +471,7 @@ def run_runtime(
             z_mean = router_state.get_z_mean(symbol)
             z_std = router_state.get_z_std(symbol)
             regime = router_state.get_regime(symbol)
+            regime_confidence = router_state.get_regime_confidence(symbol)
 
             if isinstance(result, VetoReason):
                 # Veto path: typed silence (always permitted)
@@ -447,6 +484,7 @@ def run_runtime(
                         source_event_id=event_id,
                         source_ts=timestamp,
                     )
+                    vetoes_emitted += 1
                     router_state.set_last_veto_reason(symbol, result.value)
             elif isinstance(result, AllocationResult):
                 # Intent path: positive exposure authority (v0.2 allocator)
@@ -467,7 +505,9 @@ def run_runtime(
                         z_mean=z_mean,
                         z_std=z_std,
                         regime=regime,
+                        regime_confidence=regime_confidence,
                     )
+                    intents_emitted += 1  # Count weak intents too
                     # NOTE: Do NOT update router_state.set_last_allocation()
                     # Weak intents track independently from strong intents
                     continue
@@ -491,7 +531,9 @@ def run_runtime(
                             z_mean=z_mean,
                             z_std=z_std,
                             regime=regime,
+                            regime_confidence=regime_confidence,
                         )
+                        shadows_emitted += 1
                         router_state.set_last_allocation(symbol, result)
 
                     last_veto = router_state.get_last_veto_reason(symbol)
@@ -503,6 +545,7 @@ def run_runtime(
                             source_event_id=event_id,
                             source_ts=timestamp,
                         )
+                        vetoes_emitted += 1
                         router_state.set_last_veto_reason(symbol, VetoReason.AUTHORITY_GATE.value)
                     continue  # Skip real intent emission
 
@@ -519,7 +562,9 @@ def run_runtime(
                         z_mean=z_mean,
                         z_std=z_std,
                         regime=regime,
+                        regime_confidence=regime_confidence,
                     )
+                    intents_emitted += 1
                     router_state.set_last_allocation(symbol, result)
 
 
@@ -705,6 +750,17 @@ def main() -> None:
         action="store_true",
         help="Use mock envelope kernel instead of real bootstrap MC (for testing/fallback)",
     )
+    parser.add_argument(
+        "--heartbeat",
+        type=float,
+        default=30.0,
+        help="Heartbeat interval in seconds (default: 30.0)",
+    )
+    parser.add_argument(
+        "--soak-contract",
+        type=Path,
+        help="Path to SOAK_CONTRACT.json for formal soak tracking",
+    )
 
     args = parser.parse_args()
 
@@ -718,7 +774,23 @@ def main() -> None:
     build_meta = compute_build_metadata(repo_root)
     router_commit = get_router_commit(repo_root)
 
+    # Gate 1: Set build identity for all emissions
+    router_build_sha = build_meta['combined_sha256'][:16]
+    set_router_build_sha(router_build_sha)
+
+    # Load soak contract if provided
+    if args.soak_contract:
+        contract_path = args.soak_contract.expanduser().resolve()
+        if contract_path.exists():
+            contract_hash = hashlib.sha256(contract_path.read_bytes()).hexdigest()[:16]
+            set_soak_contract_hash(contract_hash)
+            print(f"soak_contract: {contract_path.name}", file=sys.stderr)
+            print(f"soak_contract_hash: {contract_hash}", file=sys.stderr)
+        else:
+            print(f"WARNING: soak contract not found: {contract_path}", file=sys.stderr)
+
     print(f"router_commit: {router_commit[:8] if router_commit != 'unknown' else 'unknown'}", file=sys.stderr)
+    print(f"router_build_sha: {router_build_sha}", file=sys.stderr)
     print(f"build_meta.combined: {build_meta['combined_sha256'][:16]}...", file=sys.stderr)
 
     # Authority binding
@@ -745,7 +817,14 @@ def main() -> None:
         run_replay(input_spine, output_spine, authority_state)
     else:
         use_real_kernel = not args.mock_kernel
-        run_runtime(args.spine, args.poll, authority_state, demotions_path, use_real_kernel)
+        run_runtime(
+            args.spine,
+            args.poll,
+            authority_state,
+            demotions_path,
+            use_real_kernel,
+            heartbeat_interval=args.heartbeat,
+        )
 
 
 if __name__ == "__main__":

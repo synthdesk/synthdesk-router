@@ -32,6 +32,32 @@ from schemas.router_intent import INTENT_SCHEMA_VERSION, validate_router_intent
 
 logger = logging.getLogger(__name__)
 
+# Module-level build identity (set by main.py at startup)
+_ROUTER_BUILD_SHA: Optional[str] = None
+_SOAK_CONTRACT_HASH: Optional[str] = None
+
+
+def set_router_build_sha(sha: str) -> None:
+    """Set router build SHA for all emissions. Called once at startup."""
+    global _ROUTER_BUILD_SHA
+    _ROUTER_BUILD_SHA = sha
+
+
+def get_router_build_sha() -> Optional[str]:
+    """Get current router build SHA."""
+    return _ROUTER_BUILD_SHA
+
+
+def set_soak_contract_hash(hash: str) -> None:
+    """Set soak contract hash for heartbeat emissions."""
+    global _SOAK_CONTRACT_HASH
+    _SOAK_CONTRACT_HASH = hash
+
+
+def get_soak_contract_hash() -> Optional[str]:
+    """Get current soak contract hash."""
+    return _SOAK_CONTRACT_HASH
+
 # Default exit trigger (v0.3 constitutional)
 DEFAULT_EXIT_TRIGGER = "time_stop"
 
@@ -61,9 +87,15 @@ def _write_event(spine_path: Path, event: Dict) -> bool:
     """
     Write event to spine (internal helper).
 
+    Automatically attaches router_build_sha if set.
+
     Returns:
         True if written successfully, False on error
     """
+    # Attach build identity to every event (Gate 1 requirement)
+    if _ROUTER_BUILD_SHA is not None:
+        event["router_build_sha"] = _ROUTER_BUILD_SHA
+
     try:
         with spine_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(event, sort_keys=True) + "\n")
@@ -119,6 +151,7 @@ def emit_intent(
     z_mean: Optional[float] = None,
     z_std: Optional[float] = None,
     regime: Optional[str] = None,
+    regime_confidence: Optional[float] = None,
 ) -> Tuple[bool, Optional[str]]:
     """
     Append router.intent event to spine.
@@ -178,6 +211,7 @@ def emit_intent(
             z_mean=z_mean,
             z_std=z_std,
             regime=regime,
+            regime_confidence=regime_confidence,
         )
         payload["envelope"] = composite_env.to_dict()
     else:
@@ -234,6 +268,7 @@ def emit_weak_intent(
     z_mean: Optional[float] = None,
     z_std: Optional[float] = None,
     regime: Optional[str] = None,
+    regime_confidence: Optional[float] = None,
 ) -> Tuple[bool, Optional[str]]:
     """
     Append router.intent_weak event to spine.
@@ -300,6 +335,7 @@ def emit_weak_intent(
             z_mean=z_mean,
             z_std=z_std,
             regime=regime,
+            regime_confidence=regime_confidence,
         )
         payload["envelope"] = composite_env.to_dict()
     else:
@@ -357,6 +393,7 @@ def emit_shadow_intent(
     z_mean: Optional[float] = None,
     z_std: Optional[float] = None,
     regime: Optional[str] = None,
+    regime_confidence: Optional[float] = None,
 ) -> bool:
     """
     Append router.intent_shadow event to spine.
@@ -419,6 +456,7 @@ def emit_shadow_intent(
             z_mean=z_mean,
             z_std=z_std,
             regime=regime,
+            regime_confidence=regime_confidence,
         )
         payload["envelope"] = composite_env.to_dict()
     else:
@@ -487,6 +525,60 @@ def emit_veto(
         "payload": payload,
         "source_event_id": source_event_id,
         "source_ts": source_ts,
+    }
+
+    return _write_event(spine_path, event)
+
+
+def emit_heartbeat(
+    spine_path: Path,
+    authority_level: str,
+    spine_offset: int,
+    events_consumed: int,
+    intents_emitted: int,
+    vetoes_emitted: int,
+    shadows_emitted: int,
+    last_event_ts: Optional[str] = None,
+) -> bool:
+    """
+    Append router.heartbeat event to spine.
+
+    Heartbeat proves router liveness. Emitted on time interval regardless of
+    event activity. Critical for detecting silent failures.
+
+    Args:
+        spine_path: Path to event_spine.jsonl
+        authority_level: Current authority level (e.g., "v0.1", "v0.2")
+        spine_offset: Current byte offset in spine
+        events_consumed: Total events consumed this session
+        intents_emitted: Total intents emitted this session
+        vetoes_emitted: Total vetoes emitted this session
+        shadows_emitted: Total shadow intents emitted this session
+        last_event_ts: Timestamp of last consumed event (None if no events yet)
+
+    Returns:
+        True if written successfully, False on error
+    """
+    now = datetime.now(timezone.utc)
+
+    payload = {
+        "authority_level": authority_level,
+        "spine_offset": spine_offset,
+        "events_consumed": events_consumed,
+        "intents_emitted": intents_emitted,
+        "vetoes_emitted": vetoes_emitted,
+        "shadows_emitted": shadows_emitted,
+        "last_event_ts": last_event_ts,
+    }
+
+    # Include soak contract hash if set
+    if _SOAK_CONTRACT_HASH is not None:
+        payload["soak_contract_hash"] = _SOAK_CONTRACT_HASH
+
+    event = {
+        "event_type": "router.heartbeat",
+        "timestamp": now.isoformat(),
+        "payload": payload,
     }
 
     return _write_event(spine_path, event)
