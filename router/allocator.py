@@ -15,8 +15,29 @@ This is the economic core of v0.2 authority.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
+
+from router.cross_asset import (
+    CrossAssetConfig,
+    get_global_throttle,
+    load_cross_asset_config_from_env,
+)
+from router.epistemic import (
+    EpistemicConfig,
+    KernelMultipliers,
+    ParticipationQuality,
+    compute_effective_size,
+    load_epistemic_config_from_env,
+    load_kernel_multipliers,
+    load_participation_quality,
+)
+from router.horizon import (
+    HorizonAwareSizer,
+    load_horizon_config_from_env,
+    load_horizon_index,
+)
 
 
 # ---------------------------
@@ -32,6 +53,7 @@ class Regime(Enum):
     CHOP = "chop"           # No edge, flat posture
     HIGH_VOL = "high_vol"   # Risk excess, reduced exposure
     DRIFT = "drift"         # Trend present, directional posture
+    DRIFT_PERSIST = "drift_persist"  # Persistent drift, directional posture
     BREAKOUT = "breakout"   # Momentum event, elevated exposure
     UNKNOWN = "unknown"     # Unclassified, veto
 
@@ -93,11 +115,18 @@ REGIME_POSTURE_MAP: Dict[Regime, RegimePosture] = {
         rationale="regime=high_vol: risk excess, no exposure",
     ),
     Regime.DRIFT: RegimePosture(
-        direction=Direction.LONG,  # Drift implies trend-following
+        direction=Direction.FLAT,
+        base_allocation_q=0,
+        uncertainty_discount=1.0,
+        risk_cap=RiskCap.ZERO,
+        rationale="regime=drift: no persistence, flat posture",
+    ),
+    Regime.DRIFT_PERSIST: RegimePosture(
+        direction=Direction.LONG,  # Persistent drift implies trend-following
         base_allocation_q=2500,    # 25% base allocation
         uncertainty_discount=0.8,  # 20% uncertainty discount
         risk_cap=RiskCap.LOW,
-        rationale="regime=drift: trend present, conservative long",
+        rationale="regime=drift_persist: trend present, conservative long",
     ),
     Regime.BREAKOUT: RegimePosture(
         direction=Direction.LONG,  # Breakout implies momentum
@@ -186,6 +215,11 @@ class AllocationResult:
     entropy_factor: float
     uncertainty_discount: float
     final_factor: float
+
+    # Epistemic sizing (v0.3+)
+    epistemic_discount: Optional[float] = None
+    epistemic_rationale: Optional[str] = None
+    epistemic_metadata: Optional[Dict] = None
 
     @property
     def size_pct_display(self) -> str:
@@ -293,6 +327,8 @@ def infer_regime(regime_str: Optional[str]) -> Regime:
         return Regime.CHOP
     elif regime_lower in ("high_vol", "volatile", "high_volatility"):
         return Regime.HIGH_VOL
+    elif regime_lower in ("drift_persist",):
+        return Regime.DRIFT_PERSIST
     elif regime_lower in ("drift", "trend", "trending"):
         return Regime.DRIFT
     elif regime_lower in ("breakout", "momentum", "break"):
@@ -308,6 +344,8 @@ def infer_regime(regime_str: Optional[str]) -> Regime:
 def compute_allocation_from_state(
     state_dict: Dict,
     symbol: str,
+    epistemic_config: Optional[EpistemicConfig] = None,
+    cross_asset_config: Optional[CrossAssetConfig] = None,
 ) -> Tuple[AllocationResult, Optional[str]]:
     """
     Compute allocation from router state.
@@ -317,6 +355,8 @@ def compute_allocation_from_state(
     Args:
         state_dict: Router state dict with system and symbols
         symbol: Symbol to allocate for
+        epistemic_config: Epistemic sizing configuration (optional, loads from env if None)
+        cross_asset_config: Cross-asset throttle configuration (optional, loads from env if None)
 
     Returns:
         (AllocationResult, veto_reason) - veto_reason is None if intent, str if veto
@@ -433,5 +473,205 @@ def compute_allocation_from_state(
         entropy = default_entropy()
 
     allocation = allocate(regime, entropy)
+
+    # Apply epistemic sizing (participation quality discount)
+    if epistemic_config is None:
+        epistemic_config = load_epistemic_config_from_env()
+
+    if epistemic_config.enabled:
+        # Load participation quality artifact
+        pq, load_error = load_participation_quality(symbol, epistemic_config)
+
+        # Track B: Load kernel multipliers if enabled
+        kernel_mults = None
+        if epistemic_config.use_kernel_multipliers:
+            kernel_mults, km_error = load_kernel_multipliers(epistemic_config)
+            # Note: kernel_mults may be None if artifact not found (graceful degradation)
+
+        # Get epistemic state from PQ artifact (if available)
+        # For Track B, we need the current epistemic state for kernel lookup
+        # This is derived from the state distribution in the PQ artifact
+        epistemic_state = None
+        if pq is not None and pq.state_distribution:
+            # Use the dominant state from distribution
+            epistemic_state = max(pq.state_distribution.keys(), key=lambda s: pq.state_distribution.get(s, 0))
+
+        # Compute effective size with epistemic discount
+        effective_size_q, epistemic_rationale, epistemic_metadata = compute_effective_size(
+            base_size_q=allocation.size_pct_q,
+            pq=pq,
+            config=epistemic_config,
+            now=datetime.utcnow(),
+            kernel_multipliers=kernel_mults,
+            regime=regime_str,
+            epistemic_state=epistemic_state,
+        )
+
+        # Store epistemic state explicitly for downstream use (Track D horizon sizing)
+        epistemic_metadata["state"] = epistemic_state
+
+        # Check for hard abstain (non-shadow mode, pq too low or invalid)
+        if effective_size_q == 0 and not epistemic_config.shadow_mode and allocation.size_pct_q > 0:
+            # Epistemic abstain - return veto
+            return (
+                AllocationResult(
+                    direction=Direction.FLAT,
+                    size_pct_q=0,
+                    size_pct_scale=SIZE_PCT_SCALE,
+                    risk_cap=RiskCap.ZERO,
+                    rationale=allocation.rationale + [f"veto: {epistemic_rationale}"],
+                    base_allocation_q=allocation.base_allocation_q,
+                    entropy_factor=allocation.entropy_factor,
+                    uncertainty_discount=allocation.uncertainty_discount,
+                    final_factor=allocation.final_factor,
+                    epistemic_discount=0.0,
+                    epistemic_rationale=epistemic_rationale,
+                    epistemic_metadata=epistemic_metadata,
+                ),
+                f"epistemic_{epistemic_rationale}",
+            )
+
+        # Apply epistemic discount (or shadow log)
+        epistemic_discount = epistemic_metadata.get("discount_applied", 1.0)
+        allocation = AllocationResult(
+            direction=allocation.direction,
+            size_pct_q=effective_size_q,
+            size_pct_scale=allocation.size_pct_scale,
+            risk_cap=allocation.risk_cap,
+            rationale=allocation.rationale + [epistemic_rationale],
+            base_allocation_q=allocation.base_allocation_q,
+            entropy_factor=allocation.entropy_factor,
+            uncertainty_discount=allocation.uncertainty_discount,
+            final_factor=allocation.final_factor,
+            epistemic_discount=epistemic_discount,
+            epistemic_rationale=epistemic_rationale,
+            epistemic_metadata=epistemic_metadata,
+        )
+
+    # Apply horizon-aware sizing (Track D)
+    horizon_config = load_horizon_config_from_env()
+
+    if horizon_config.enabled and allocation.size_pct_q > 0:
+        # Load horizon index
+        horizon_index, idx_error = load_horizon_index(horizon_config)
+
+        # Create sizer (graceful degradation if no index)
+        horizon_sizer = HorizonAwareSizer(
+            index=horizon_index,
+            config=horizon_config,
+        )
+
+        # Derive epistemic state from allocation metadata (stored explicitly above)
+        epistemic_state = "INTERIOR"
+        if allocation.epistemic_metadata:
+            epistemic_state = allocation.epistemic_metadata.get("state") or "INTERIOR"
+
+        # Compute horizon adjustment
+        adjusted_size, horizon_meta = horizon_sizer.size(
+            asset=symbol,
+            epistemic_state=epistemic_state,
+            base_size=float(allocation.size_pct_q),
+        )
+
+        adjusted_size_q = int(round(adjusted_size))
+
+        # Update allocation with horizon metadata
+        # Shadow mode invariant: size_pct_q unchanged when shadow_mode=True
+        allocation = AllocationResult(
+            direction=allocation.direction,
+            size_pct_q=adjusted_size_q if not horizon_config.shadow_mode else allocation.size_pct_q,
+            size_pct_scale=allocation.size_pct_scale,
+            risk_cap=allocation.risk_cap,
+            rationale=allocation.rationale + [f"horizon:{horizon_meta.get('horizon_used', 15)}m"],
+            base_allocation_q=allocation.base_allocation_q,
+            entropy_factor=allocation.entropy_factor,
+            uncertainty_discount=allocation.uncertainty_discount,
+            final_factor=allocation.final_factor,
+            epistemic_discount=allocation.epistemic_discount,
+            epistemic_rationale=allocation.epistemic_rationale,
+            epistemic_metadata={
+                **(allocation.epistemic_metadata or {}),
+                "horizon": horizon_meta,
+            },
+        )
+
+    # Apply cross-asset global throttle (Task 3)
+    if cross_asset_config is None:
+        cross_asset_config = load_cross_asset_config_from_env()
+
+    if cross_asset_config.enabled:
+        global_throttle, throttle_rationale, throttle_metadata = get_global_throttle(
+            cross_asset_config,
+            now=datetime.utcnow(),
+        )
+
+        # Apply global throttle to size
+        if global_throttle < 1.0 and allocation.size_pct_q > 0:
+            throttled_size_q = int(allocation.size_pct_q * global_throttle + 0.5)
+
+            # Check for global risk-off (throttle = 0)
+            if throttled_size_q == 0 and not cross_asset_config.shadow_mode:
+                return (
+                    AllocationResult(
+                        direction=Direction.FLAT,
+                        size_pct_q=0,
+                        size_pct_scale=SIZE_PCT_SCALE,
+                        risk_cap=RiskCap.ZERO,
+                        rationale=allocation.rationale + [f"veto: global_risk_off ({throttle_rationale})"],
+                        base_allocation_q=allocation.base_allocation_q,
+                        entropy_factor=allocation.entropy_factor,
+                        uncertainty_discount=allocation.uncertainty_discount,
+                        final_factor=allocation.final_factor,
+                        epistemic_discount=allocation.epistemic_discount,
+                        epistemic_rationale=allocation.epistemic_rationale,
+                        epistemic_metadata={
+                            **(allocation.epistemic_metadata or {}),
+                            "global_throttle": throttle_metadata,
+                        },
+                    ),
+                    "global_risk_off",
+                )
+
+            # Apply throttle (or shadow log)
+            if not cross_asset_config.shadow_mode:
+                allocation = AllocationResult(
+                    direction=allocation.direction,
+                    size_pct_q=throttled_size_q,
+                    size_pct_scale=allocation.size_pct_scale,
+                    risk_cap=allocation.risk_cap,
+                    rationale=allocation.rationale + [throttle_rationale],
+                    base_allocation_q=allocation.base_allocation_q,
+                    entropy_factor=allocation.entropy_factor,
+                    uncertainty_discount=allocation.uncertainty_discount,
+                    final_factor=allocation.final_factor,
+                    epistemic_discount=allocation.epistemic_discount,
+                    epistemic_rationale=allocation.epistemic_rationale,
+                    epistemic_metadata={
+                        **(allocation.epistemic_metadata or {}),
+                        "global_throttle": throttle_metadata,
+                    },
+                )
+            else:
+                # Shadow mode: log but don't apply
+                allocation = AllocationResult(
+                    direction=allocation.direction,
+                    size_pct_q=allocation.size_pct_q,
+                    size_pct_scale=allocation.size_pct_scale,
+                    risk_cap=allocation.risk_cap,
+                    rationale=allocation.rationale + [throttle_rationale],
+                    base_allocation_q=allocation.base_allocation_q,
+                    entropy_factor=allocation.entropy_factor,
+                    uncertainty_discount=allocation.uncertainty_discount,
+                    final_factor=allocation.final_factor,
+                    epistemic_discount=allocation.epistemic_discount,
+                    epistemic_rationale=allocation.epistemic_rationale,
+                    epistemic_metadata={
+                        **(allocation.epistemic_metadata or {}),
+                        "global_throttle": {
+                            **throttle_metadata,
+                            "would_be_size_q": throttled_size_q,
+                        },
+                    },
+                )
 
     return (allocation, None)
