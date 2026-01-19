@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     from router.constraints import VetoReason
 
 from router.envelope import DEFAULT_HORIZON_MINUTES, make_mock_envelope
+from emission.speech_v1 import emit_speech_v1
 from router.envelope_provider import Envelope as RealEnvelope
 from router.envelope_provider import make_envelope as make_real_envelope
 from router.envelope_provider import (
@@ -93,6 +94,11 @@ def _write_event(spine_path: Path, event: Dict) -> bool:
     Returns:
         True if written successfully, False on error
     """
+    if event.get("event_type") != "router.speech.v1":
+        speech_event = emit_speech_v1(event)
+        if speech_event is not None:
+            _write_event(spine_path, speech_event)
+
     # Attach build identity to every event (Gate 1 requirement)
     if _ROUTER_BUILD_SHA is not None:
         event["router_build_sha"] = _ROUTER_BUILD_SHA
