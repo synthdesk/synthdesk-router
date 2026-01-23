@@ -51,6 +51,13 @@ from router.state import RouterState
 # Version
 ROUTER_VERSION = "0.2"
 
+# CONSTITUTIONAL: Schema hash enforcement (turns drift into boot failure)
+# Frozen: 2026-01-23
+from schemas.router_decision import ROUTER_DECISION_SCHEMA_HASH
+assert ROUTER_DECISION_SCHEMA_HASH == "dad3e1d2824262be", (
+    f"Schema drift detected: expected dad3e1d2824262be, got {ROUTER_DECISION_SCHEMA_HASH}"
+)
+
 # Default spine path (configurable via CLI)
 DEFAULT_SPINE_PATH = Path("/root/synthdesk-listener/runs/0.2.0/event_spine.jsonl")
 DEFAULT_POLL_INTERVAL = 1.0
