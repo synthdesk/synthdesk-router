@@ -52,10 +52,11 @@ from router.state import RouterState
 ROUTER_VERSION = "0.2"
 
 # CONSTITUTIONAL: Schema hash enforcement (turns drift into boot failure)
-# Frozen: 2026-01-23
+# v1.0 frozen: 2026-01-23 (dad3e1d2824262be)
+# v1.1 amended: 2026-01-23 (c4bdc5fe80e2d991) - added decision_authority
 from schemas.router_decision import ROUTER_DECISION_SCHEMA_HASH
-assert ROUTER_DECISION_SCHEMA_HASH == "dad3e1d2824262be", (
-    f"Schema drift detected: expected dad3e1d2824262be, got {ROUTER_DECISION_SCHEMA_HASH}"
+assert ROUTER_DECISION_SCHEMA_HASH == "c4bdc5fe80e2d991", (
+    f"Schema drift detected: expected c4bdc5fe80e2d991, got {ROUTER_DECISION_SCHEMA_HASH}"
 )
 
 # Default spine path (configurable via CLI)
@@ -640,7 +641,38 @@ def run_runtime(
                 # - NOT gated by authority
                 # - Do NOT update state.last_allocation (independent tracking)
                 # - Always emit (no dedup against strong intents)
+                # - AMENDED: Emit decision event for observability (decision_authority="weak")
                 if intent_strength == IntentStrength.WEAK:
+                    # DOCTRINE: VETO_TIMESCALE - Surface gate evaluation for weak intents
+                    # Emits decision event for observability; weak intents always emit regardless of gate
+                    if surface_gate_enabled:
+                        regime_surface, micro_surface = surface_cache.get_surfaces(symbol)
+                        weak_allowed, weak_veto_reason, weak_decision = evaluate_surface_gate(
+                            asset=symbol,
+                            intended_hold_min=intended_hold_min,
+                            regime_surface=regime_surface,
+                            micro_surface=micro_surface,
+                            policy_id=surface_policy_id,
+                        )
+                        weak_decision_dict = decision_to_dict(weak_decision)
+                        emit_decision(
+                            spine_path=spine_path,
+                            symbol=symbol,
+                            intended_hold_min=intended_hold_min,
+                            policy_id=weak_decision.policy_id,
+                            policy_defaulted=weak_decision.policy_defaulted,
+                            allowed=weak_decision.allowed,
+                            veto_reason=weak_veto_reason,
+                            blocks=weak_decision_dict["blocks"],
+                            annotations=weak_decision_dict["annotations"],
+                            attached_surfaces=weak_decision_dict["attached_surfaces"],
+                            source_event_id=event_id,
+                            source_ts=timestamp,
+                            decision_authority="weak",
+                        )
+                        # NOTE: Weak intents always emit regardless of gate decision
+                        # The decision event is purely for observability
+
                     emit_weak_intent(
                         spine_path=spine_path,
                         symbol=symbol,
@@ -668,8 +700,39 @@ def run_runtime(
                     # Authority gate: emit shadow intent (counterfactual) + veto
                     # Shadow intent feeds EVT-1 without granting real authority
                     # Multi-horizon: emit one shadow per observation horizon (observability only)
+                    # AMENDED: Emit decision event for observability (decision_authority="shadow")
                     last_allocation = router_state.get_last_allocation(symbol)
                     if should_emit_intent(result, last_allocation):
+                        # DOCTRINE: VETO_TIMESCALE - Surface gate evaluation for shadow intents
+                        # Emits decision event for observability; shadow intents always emit regardless of gate
+                        if surface_gate_enabled:
+                            regime_surface, micro_surface = surface_cache.get_surfaces(symbol)
+                            shadow_allowed, shadow_veto_reason, shadow_decision = evaluate_surface_gate(
+                                asset=symbol,
+                                intended_hold_min=intended_hold_min,
+                                regime_surface=regime_surface,
+                                micro_surface=micro_surface,
+                                policy_id=surface_policy_id,
+                            )
+                            shadow_decision_dict = decision_to_dict(shadow_decision)
+                            emit_decision(
+                                spine_path=spine_path,
+                                symbol=symbol,
+                                intended_hold_min=intended_hold_min,
+                                policy_id=shadow_decision.policy_id,
+                                policy_defaulted=shadow_decision.policy_defaulted,
+                                allowed=shadow_decision.allowed,
+                                veto_reason=shadow_veto_reason,
+                                blocks=shadow_decision_dict["blocks"],
+                                annotations=shadow_decision_dict["annotations"],
+                                attached_surfaces=shadow_decision_dict["attached_surfaces"],
+                                source_event_id=event_id,
+                                source_ts=timestamp,
+                                decision_authority="shadow",
+                            )
+                            # NOTE: Shadow intents always emit regardless of gate decision
+                            # The decision event is purely for observability
+
                         for horizon_min in SHADOW_OBSERVATION_HORIZONS:
                             emit_shadow_intent(
                                 spine_path=spine_path,
@@ -736,6 +799,7 @@ def run_runtime(
                             attached_surfaces=decision_dict["attached_surfaces"],
                             source_event_id=event_id,
                             source_ts=timestamp,
+                            decision_authority="real",
                         )
 
                         if not gate_allowed:

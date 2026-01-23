@@ -405,24 +405,37 @@ def make_decision_event_payload(
     decision: SurfaceDecision,
     source_ts: str,
     source_event_id: str,
+    decision_authority: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Create payload for router.decision.v1 event.
 
     This payload attaches surface hashes for audit/replay.
+    Validates against frozen schema before returning.
 
     Args:
         decision: SurfaceDecision from policy evaluation
         source_ts: Source event timestamp
         source_event_id: Source event ID
+        decision_authority: Authority level at decision time ("shadow", "weak", "real")
+                          Defaults to "real" for backward compatibility.
 
     Returns:
         Payload dict for router.decision.v1
+
+    Raises:
+        ValueError: If payload violates frozen schema invariants
     """
     decision_dict = decision_to_dict(decision)
     decision_dict["source_ts"] = source_ts
     decision_dict["source_event_id"] = source_event_id
-    decision_dict["schema_version"] = "1.0"
+    decision_dict["schema_version"] = "1.1"
+    decision_dict["decision_authority"] = decision_authority or "real"
+
+    # ENFORCEMENT: Validate against schema (added 2026-01-23)
+    # Import kept local to avoid import-order coupling and localize failure
+    from schemas.router_decision import validate_decision_payload_strict
+    validate_decision_payload_strict(decision_dict)
 
     return decision_dict
 
