@@ -52,6 +52,7 @@ class VetoReason(str, Enum):
     - System vetoes: infrastructure issues, always "honest" by construction
     - Edge-absent vetoes: no market signal detected, abstention (not chaos claim)
     - Danger vetoes: market conditions unsafe, should correlate with chaos
+    - Surface vetoes: veto surface blocks based on time-scale (DOCTRINE: VETO_TIMESCALE)
     """
 
     # System vetoes (infrastructure)
@@ -66,6 +67,15 @@ class VetoReason(str, Enum):
 
     # Danger vetoes (should correlate with chaos)
     REGIME_VOLATILE = "regime_volatile"  # high_vol regime: excess risk
+
+    # Surface vetoes (DOCTRINE: VETO_TIMESCALE, added 2026-01-23)
+    # Time-scale aware blocking based on veto surfaces
+    SURFACE_REGIME_BLOCK = "surface_regime_block"  # regime surface blocks long holds
+    SURFACE_MICRO_BLOCK = "surface_micro_block"  # micro surface blocks short holds
+    SURFACE_REGIME_STALE = "surface_regime_stale"  # regime surface STALE/ERROR (fail-closed)
+    SURFACE_REGIME_MISSING = "surface_regime_missing"  # regime surface not found (fail-closed)
+    SURFACE_MICRO_STALE = "surface_micro_stale"  # micro surface STALE/ERROR (P_UNION_SAFETY)
+    SURFACE_MISSING_HOLD = "surface_missing_hold"  # intended_hold_min not provided (HARD BLOCK)
 
 
 class IntentStrength(str, Enum):

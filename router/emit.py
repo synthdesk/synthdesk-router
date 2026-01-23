@@ -14,11 +14,12 @@ import json
 import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 if TYPE_CHECKING:
     from router.allocator import AllocationResult
     from router.constraints import VetoReason
+    from emission.speech_counters import SpeechCycle
 
 from router.envelope import DEFAULT_HORIZON_MINUTES, make_mock_envelope
 from emission.speech_v1 import emit_speech_v1
@@ -31,6 +32,7 @@ from router.envelope_provider import (
     COMPOSITE_KERNEL_BUILD_SHA,
 )
 from schemas.router_intent import INTENT_SCHEMA_VERSION, validate_router_intent
+from synthdesk_spine.event_types import ROUTER_DECISION_V1
 
 logger = logging.getLogger(__name__)
 
@@ -85,7 +87,11 @@ except ImportError:
         return payload
 
 
-def _write_event(spine_path: Path, event: Dict) -> bool:
+def _write_event(
+    spine_path: Path,
+    event: Dict,
+    speech_cycle: Optional["SpeechCycle"] = None,
+) -> bool:
     """
     Write event to spine (internal helper).
 
@@ -95,9 +101,11 @@ def _write_event(spine_path: Path, event: Dict) -> bool:
         True if written successfully, False on error
     """
     if event.get("event_type") != "router.speech.v1":
-        speech_event = emit_speech_v1(event)
+        speech_event, silence_reason = emit_speech_v1(event)
+        if speech_cycle is not None:
+            speech_cycle.observe(speech_event, silence_reason)
         if speech_event is not None:
-            _write_event(spine_path, speech_event)
+            _write_event(spine_path, speech_event, None)
 
     # Attach build identity to every event (Gate 1 requirement)
     if _ROUTER_BUILD_SHA is not None:
@@ -125,6 +133,7 @@ def _emit_surface_veto(
     validation_error: str,
     source_event_id: str,
     source_ts: str,
+    speech_cycle: Optional["SpeechCycle"] = None,
 ) -> None:
     """
     Emit a veto due to surface validation failure.
@@ -147,7 +156,7 @@ def _emit_surface_veto(
         "source_ts": source_ts,
     }
 
-    _write_event(spine_path, event)
+    _write_event(spine_path, event, speech_cycle)
     logger.warning(f"SURFACE VETO: intent blocked (validation: {validation_error})")
 
 
@@ -166,6 +175,7 @@ def emit_intent(
     z_std: Optional[float] = None,
     regime: Optional[str] = None,
     regime_confidence: Optional[float] = None,
+    speech_cycle: Optional["SpeechCycle"] = None,
 ) -> Tuple[bool, Optional[str]]:
     """
     Append router.intent event to spine.
@@ -256,6 +266,7 @@ def emit_intent(
             validation_error=str(e),
             source_event_id=source_event_id,
             source_ts=source_ts,
+            speech_cycle=speech_cycle,
         )
         return (False, f"surface_invalid: {e}")
 
@@ -268,7 +279,7 @@ def emit_intent(
         "source_ts": source_ts,
     }
 
-    if _write_event(spine_path, event):
+    if _write_event(spine_path, event, speech_cycle):
         return (True, None)
     else:
         return (False, "write_failed")
@@ -289,6 +300,7 @@ def emit_weak_intent(
     z_std: Optional[float] = None,
     regime: Optional[str] = None,
     regime_confidence: Optional[float] = None,
+    speech_cycle: Optional["SpeechCycle"] = None,
 ) -> Tuple[bool, Optional[str]]:
     """
     Append router.intent_weak event to spine.
@@ -386,6 +398,7 @@ def emit_weak_intent(
             validation_error=str(e),
             source_event_id=source_event_id,
             source_ts=source_ts,
+            speech_cycle=speech_cycle,
         )
         return (False, f"surface_invalid: {e}")
 
@@ -398,7 +411,7 @@ def emit_weak_intent(
         "source_ts": source_ts,
     }
 
-    if _write_event(spine_path, event):
+    if _write_event(spine_path, event, speech_cycle):
         return (True, None)
     else:
         return (False, "write_failed")
@@ -420,6 +433,7 @@ def emit_shadow_intent(
     z_std: Optional[float] = None,
     regime: Optional[str] = None,
     regime_confidence: Optional[float] = None,
+    speech_cycle: Optional["SpeechCycle"] = None,
 ) -> bool:
     """
     Append router.intent_shadow event to spine.
@@ -511,7 +525,7 @@ def emit_shadow_intent(
         "source_ts": source_ts,
     }
 
-    return _write_event(spine_path, event)
+    return _write_event(spine_path, event, speech_cycle)
 
 
 def emit_veto(
@@ -520,6 +534,7 @@ def emit_veto(
     veto_reason: "VetoReason",
     source_event_id: str,
     source_ts: str,
+    speech_cycle: Optional["SpeechCycle"] = None,
 ) -> bool:
     """
     Append router.veto event to spine.
@@ -559,7 +574,7 @@ def emit_veto(
         "source_ts": source_ts,
     }
 
-    return _write_event(spine_path, event)
+    return _write_event(spine_path, event, speech_cycle)
 
 
 def emit_heartbeat(
@@ -611,6 +626,124 @@ def emit_heartbeat(
         "event_type": "router.heartbeat",
         "timestamp": now.isoformat(),
         "payload": payload,
+    }
+
+    return _write_event(spine_path, event)
+
+
+def emit_health_summary(
+    spine_path: Path,
+    authority_level: str,
+    window_s: int,
+    events_in_window: int,
+    intents_in_window: int,
+    vetoes_in_window: int,
+    shadows_in_window: int,
+    violations_in_window: int,
+    per_symbol_events: Dict[str, int],
+    per_symbol_regimes: Dict[str, str],
+    lag_s: float,
+    last_event_ts: Optional[str],
+    uptime_s: float,
+) -> bool:
+    """
+    Append router.health_summary event to spine.
+
+    Summarizes recent router activity for dashboards and alerting.
+    """
+    now = datetime.now(timezone.utc)
+
+    payload = {
+        "authority_level": authority_level,
+        "window_s": window_s,
+        "events_in": events_in_window,
+        "intents": intents_in_window,
+        "vetoes": vetoes_in_window,
+        "shadows": shadows_in_window,
+        "violations": violations_in_window,
+        "per_symbol_events": per_symbol_events,
+        "per_symbol_regimes": per_symbol_regimes,
+        "lag_s": round(lag_s, 2),
+        "last_event_ts": last_event_ts,
+        "uptime_s": round(uptime_s, 2),
+    }
+
+    if window_s > 0:
+        payload["event_rate_per_min"] = round(events_in_window / (window_s / 60.0), 2)
+    if vetoes_in_window > 0:
+        payload["intent_veto_ratio"] = round(intents_in_window / vetoes_in_window, 2)
+
+    event = {
+        "event_type": "router.health_summary",
+        "timestamp": now.isoformat(),
+        "payload": payload,
+    }
+
+    return _write_event(spine_path, event)
+
+
+def emit_decision(
+    spine_path: Path,
+    symbol: str,
+    intended_hold_min: int,
+    policy_id: str,
+    policy_defaulted: bool,
+    allowed: bool,
+    veto_reason: Optional["VetoReason"],
+    blocks: List[Dict],
+    annotations: List[str],
+    attached_surfaces: Dict[str, Dict],
+    source_event_id: str,
+    source_ts: str,
+) -> bool:
+    """
+    Append router.decision.v1 event to spine.
+
+    DOCTRINE: VETO_TIMESCALE
+
+    Decision events capture the full surface gate evaluation result,
+    providing audit trail and replay capability for time-scale aware blocking.
+
+    This is an EXPLANATORY event, not an ACTION event. It explains why
+    an intent was emitted or why a veto occurred based on surface evaluation.
+
+    Args:
+        spine_path: Path to event_spine.jsonl
+        symbol: Symbol identifier
+        intended_hold_min: The holding period that was evaluated (REQUIRED)
+        policy_id: Policy used for evaluation (e.g., "P_HOLD_BLOCK_REGIME")
+        policy_defaulted: True if policy_id was defaulted (not explicit)
+        allowed: True if surfaces allowed the action
+        veto_reason: VetoReason if blocked by surface, None if allowed
+        blocks: List of block reasons from surface evaluation
+        annotations: List of annotations from surface evaluation
+        attached_surfaces: Dict of surface references (regime, micro)
+        source_event_id: Event ID that triggered this decision
+        source_ts: Timestamp from source event
+
+    Returns:
+        True if written successfully, False on error
+    """
+    payload = {
+        "symbol": symbol,
+        "intended_hold_min": intended_hold_min,
+        "policy_id": policy_id,
+        "policy_defaulted": policy_defaulted,
+        "allowed": allowed,
+        "veto_reason": veto_reason.value if veto_reason else None,
+        "blocks": blocks,
+        "annotations": annotations,
+        "attached_surfaces": attached_surfaces,
+        "schema_version": "1.0",
+    }
+
+    payload = canonicalize_payload(payload, skip_unknown=True)
+
+    event = {
+        "event_type": ROUTER_DECISION_V1,
+        "payload": payload,
+        "source_event_id": source_event_id,
+        "source_ts": source_ts,
     }
 
     return _write_event(spine_path, event)

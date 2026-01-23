@@ -14,6 +14,8 @@ Authority is not assumed. Authority is proven via certificate.
 """
 
 import argparse
+import atexit
+from bisect import bisect_right
 import hashlib
 import json
 import subprocess
@@ -37,7 +39,11 @@ from router.constraints import (
     evaluate_constraints_with_strength,
     should_emit_intent,
 )
-from router.emit import emit_intent, emit_shadow_intent, emit_veto, emit_weak_intent, emit_heartbeat, set_router_build_sha, set_soak_contract_hash
+from emission.speech_counters import INVALID_TIMESTAMP, OTHER_INVARIANT_FAIL, SpeechCounters
+from router.emit import emit_intent, emit_shadow_intent, emit_veto, emit_weak_intent, emit_heartbeat, emit_health_summary, emit_decision, set_router_build_sha, set_soak_contract_hash
+from router.envelope import DEFAULT_HORIZON_MINUTES
+from router.surface_integration import SurfaceCache, evaluate_surface_gate
+from router.surface_policy import PolicyId, decision_to_dict
 from router.envelope_provider import TickBuffer
 from router.spine_reader import SpineReader
 from router.state import RouterState
@@ -57,6 +63,12 @@ ALLOWED_EVENT_TYPES = {
     "market.regime",
     "market.regime_change",
 }
+
+# Shadow observation horizons (minutes)
+# Multi-horizon shadow emission for EVT-0/EVT-1 diagnostic coverage.
+# This is purely observational - does NOT change any decision logic.
+# Constitutional: adding observability, not tuning behavior.
+SHADOW_OBSERVATION_HORIZONS = [5, 10, 12, 15, 20, 30, 45, 60]
 
 # Critical source files for build metadata
 # All governance-critical modules must be included here
@@ -139,6 +151,47 @@ def _parse_tick_timestamp(ts_str: str) -> Optional[float]:
         return dt.timestamp()
     except (ValueError, AttributeError):
         return None
+
+
+def _load_ticks_by_symbol(tick_path: Path) -> Dict[str, list[tuple[float, float]]]:
+    """Load tick observations into per-symbol lists of (ts_epoch, price)."""
+    ticks: Dict[str, list[tuple[float, float]]] = {}
+    with tick_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                tick = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            symbol = tick.get("asset")
+            price = tick.get("price")
+            ts_epoch = _parse_tick_timestamp(tick.get("ts_utc"))
+            if not symbol or ts_epoch is None or price is None:
+                continue
+            ticks.setdefault(symbol, []).append((ts_epoch, float(price)))
+
+    for symbol in ticks:
+        ticks[symbol].sort(key=lambda t: t[0])
+    return ticks
+
+
+def _get_tick_prices(
+    ticks_by_symbol: Dict[str, list[tuple[float, float]]],
+    symbol: str,
+    asof_ts: Optional[float],
+    max_n: int = 1200,
+) -> Optional[list[float]]:
+    """Return last max_n prices at or before asof_ts for symbol."""
+    if asof_ts is None:
+        return None
+    ticks = ticks_by_symbol.get(symbol, [])
+    if not ticks:
+        return None
+    idx = bisect_right(ticks, (asof_ts, float("inf")))
+    start = max(0, idx - max_n)
+    return [price for _, price in ticks[start:idx]]
 
 
 class TickWatcher:
@@ -351,9 +404,15 @@ def run_runtime(
     demotions_path: Optional[Path] = None,
     use_real_kernel: bool = True,
     heartbeat_interval: float = 30.0,
+    regime_stream_path: Optional[Path] = None,
+    micro_stream_path: Optional[Path] = None,
+    surface_policy_id: PolicyId = PolicyId.P_HOLD_BLOCK_REGIME,
+    intended_hold_min: int = DEFAULT_HORIZON_MINUTES,
 ) -> None:
     """
     Long-running router runtime with authority gating.
+
+    DOCTRINE: VETO_TIMESCALE - Integrates surface gate evaluation.
 
     Args:
         spine_path: Path to event_spine.jsonl
@@ -362,6 +421,10 @@ def run_runtime(
         demotions_path: Path for durable demotion recording
         use_real_kernel: If True, use bootstrap MC kernel (requires tick data)
         heartbeat_interval: Seconds between heartbeat emissions
+        regime_stream_path: Path to regime veto surface JSONL stream (optional)
+        micro_stream_path: Path to micro veto surface JSONL stream (optional)
+        surface_policy_id: Surface policy to apply (default: P_HOLD_BLOCK_REGIME)
+        intended_hold_min: Intended holding period in minutes (REQUIRED for surface gate)
     """
     # Pass promoted_at as authority epoch: violations before this timestamp
     # cannot demote the current authority binding (they belong to a prior epoch)
@@ -373,6 +436,16 @@ def run_runtime(
     tick_buffer = TickBuffer(max_size=1200)  # ~20 minutes at 1 tick/sec
     runs_dir = spine_path.parent  # Assume spine is in runs/0.2.0/
     tick_watcher = TickWatcher(runs_dir, tick_buffer)
+    router_runs_root = Path(__file__).resolve().parents[1] / "runs"
+    speech_counters = SpeechCounters(runs_root=router_runs_root)
+    atexit.register(speech_counters.flush)
+
+    # DOCTRINE: VETO_TIMESCALE - Surface cache for time-scale aware blocking
+    surface_cache = SurfaceCache(
+        regime_stream_path=regime_stream_path,
+        micro_stream_path=micro_stream_path,
+    )
+    surface_gate_enabled = regime_stream_path is not None or micro_stream_path is not None
 
     # Heartbeat state
     last_heartbeat_time = time.time()
@@ -381,6 +454,16 @@ def run_runtime(
     vetoes_emitted = 0
     shadows_emitted = 0
     last_event_ts: Optional[str] = None
+    # Health summary state (30-minute window)
+    HEALTH_SUMMARY_INTERVAL = 30 * 60
+    start_time = time.time()
+    last_health_summary_time = start_time
+    window_events = 0
+    window_intents = 0
+    window_vetoes = 0
+    window_shadows = 0
+    window_violations = 0
+    window_per_symbol: Dict[str, int] = {}
 
     print(f"router v{ROUTER_VERSION} runtime started", file=sys.stderr, flush=True)
     print(f"authority_level: {authority_state.level}", file=sys.stderr, flush=True)
@@ -388,6 +471,13 @@ def run_runtime(
     print(f"poll: {poll_interval}s", file=sys.stderr, flush=True)
     print(f"real_kernel: {use_real_kernel}", file=sys.stderr, flush=True)
     print(f"heartbeat_interval: {heartbeat_interval}s", file=sys.stderr, flush=True)
+    # DOCTRINE: VETO_TIMESCALE - Surface gate configuration
+    print(f"surface_gate_enabled: {surface_gate_enabled}", file=sys.stderr, flush=True)
+    if surface_gate_enabled:
+        print(f"surface_policy: {surface_policy_id.value}", file=sys.stderr, flush=True)
+        print(f"intended_hold_min: {intended_hold_min}", file=sys.stderr, flush=True)
+        print(f"regime_stream: {regime_stream_path}", file=sys.stderr, flush=True)
+        print(f"micro_stream: {micro_stream_path}", file=sys.stderr, flush=True)
 
     for event in reader.tail_with_heartbeat(skip_existing=False):
         # Check if heartbeat is due
@@ -404,6 +494,40 @@ def run_runtime(
                 last_event_ts=last_event_ts,
             )
             last_heartbeat_time = now
+
+        if now - last_health_summary_time >= HEALTH_SUMMARY_INTERVAL:
+            lag_s = 0.0
+            if last_event_ts:
+                try:
+                    last_dt = datetime.fromisoformat(last_event_ts.replace("Z", "+00:00"))
+                    lag_s = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                except (ValueError, TypeError):
+                    lag_s = 0.0
+            per_symbol_regimes = {
+                sym: data.get("regime", "unknown") for sym, data in router_state.symbols.items()
+            }
+            emit_health_summary(
+                spine_path=spine_path,
+                authority_level=str(authority_state.level),
+                window_s=int(now - last_health_summary_time),
+                events_in_window=window_events,
+                intents_in_window=window_intents,
+                vetoes_in_window=window_vetoes,
+                shadows_in_window=window_shadows,
+                violations_in_window=window_violations,
+                per_symbol_events=dict(window_per_symbol),
+                per_symbol_regimes=per_symbol_regimes,
+                lag_s=lag_s,
+                last_event_ts=last_event_ts,
+                uptime_s=now - start_time,
+            )
+            last_health_summary_time = now
+            window_events = 0
+            window_intents = 0
+            window_vetoes = 0
+            window_shadows = 0
+            window_violations = 0
+            window_per_symbol = {}
 
         # None means poll cycle with no events - continue to next cycle
         if event is None:
@@ -425,6 +549,14 @@ def run_runtime(
         events_consumed += 1
         if isinstance(timestamp, str):
             last_event_ts = timestamp
+        # Track window counters for health summary
+        window_events += 1
+        if event_type in ("market.regime", "market.regime_change"):
+            symbol = payload.get("symbol") if isinstance(payload, dict) else None
+            if isinstance(symbol, str):
+                window_per_symbol[symbol] = window_per_symbol.get(symbol, 0) + 1
+        if event_type == "invariant.violation":
+            window_violations += 1
 
         # Update state from event
         router_state.update_from_event(event)
@@ -447,7 +579,13 @@ def run_runtime(
         # Synthesize and emit (XOR: intent or veto, never both)
         emit_allowed = isinstance(event_id, str) and isinstance(timestamp, str)
         for symbol in symbols_to_check:
+            speech_cycle = speech_counters.tick()
             if not emit_allowed:
+                if not isinstance(timestamp, str):
+                    speech_cycle.observe(None, INVALID_TIMESTAMP)
+                else:
+                    speech_cycle.observe(None, OTHER_INVARIANT_FAIL)
+                speech_cycle.finalize()
                 continue
 
             # Evaluate constraints → intent or veto reason, with strength classification
@@ -483,8 +621,10 @@ def run_runtime(
                         veto_reason=result,
                         source_event_id=event_id,
                         source_ts=timestamp,
+                        speech_cycle=speech_cycle,
                     )
                     vetoes_emitted += 1
+                    window_vetoes += 1
                     router_state.set_last_veto_reason(symbol, result.value)
             elif isinstance(result, AllocationResult):
                 # Intent path: positive exposure authority (v0.2 allocator)
@@ -506,10 +646,13 @@ def run_runtime(
                         z_std=z_std,
                         regime=regime,
                         regime_confidence=regime_confidence,
+                        speech_cycle=speech_cycle,
                     )
                     intents_emitted += 1  # Count weak intents too
+                    window_intents += 1
                     # NOTE: Do NOT update router_state.set_last_allocation()
                     # Weak intents track independently from strong intents
+                    speech_cycle.finalize()
                     continue
 
                 # STRONG INTENT PATH: decisions
@@ -517,23 +660,28 @@ def run_runtime(
                 if result.direction != Direction.FLAT and not gated_router.can_emit_non_flat():
                     # Authority gate: emit shadow intent (counterfactual) + veto
                     # Shadow intent feeds EVT-1 without granting real authority
+                    # Multi-horizon: emit one shadow per observation horizon (observability only)
                     last_allocation = router_state.get_last_allocation(symbol)
                     if should_emit_intent(result, last_allocation):
-                        emit_shadow_intent(
-                            spine_path=spine_path,
-                            symbol=symbol,
-                            allocation=result,
-                            blocked_by="authority_gate",
-                            source_event_id=event_id,
-                            source_ts=timestamp,
-                            tick_prices=tick_prices,
-                            use_real_kernel=use_real_kernel,
-                            z_mean=z_mean,
-                            z_std=z_std,
-                            regime=regime,
-                            regime_confidence=regime_confidence,
-                        )
-                        shadows_emitted += 1
+                        for horizon_min in SHADOW_OBSERVATION_HORIZONS:
+                            emit_shadow_intent(
+                                spine_path=spine_path,
+                                symbol=symbol,
+                                allocation=result,
+                                blocked_by="authority_gate",
+                                source_event_id=event_id,
+                                source_ts=timestamp,
+                                tick_prices=tick_prices,
+                                use_real_kernel=use_real_kernel,
+                                horizon_minutes=horizon_min,
+                                z_mean=z_mean,
+                                z_std=z_std,
+                                regime=regime,
+                                regime_confidence=regime_confidence,
+                                speech_cycle=speech_cycle,
+                            )
+                            shadows_emitted += 1
+                            window_shadows += 1
                         router_state.set_last_allocation(symbol, result)
 
                     last_veto = router_state.get_last_veto_reason(symbol)
@@ -544,13 +692,63 @@ def run_runtime(
                             veto_reason=VetoReason.AUTHORITY_GATE,
                             source_event_id=event_id,
                             source_ts=timestamp,
+                            speech_cycle=speech_cycle,
                         )
                         vetoes_emitted += 1
+                        window_vetoes += 1
                         router_state.set_last_veto_reason(symbol, VetoReason.AUTHORITY_GATE.value)
+                    speech_cycle.finalize()
                     continue  # Skip real intent emission
 
                 last_allocation = router_state.get_last_allocation(symbol)
                 if should_emit_intent(result, last_allocation):
+                    # DOCTRINE: VETO_TIMESCALE - Surface gate evaluation
+                    # Evaluate BEFORE emitting intent; if blocked, emit veto instead
+                    if surface_gate_enabled:
+                        regime_surface, micro_surface = surface_cache.get_surfaces(symbol)
+                        gate_allowed, gate_veto_reason, gate_decision = evaluate_surface_gate(
+                            asset=symbol,
+                            intended_hold_min=intended_hold_min,
+                            regime_surface=regime_surface,
+                            micro_surface=micro_surface,
+                            policy_id=surface_policy_id,
+                        )
+
+                        # Always emit decision event (audit trail)
+                        decision_dict = decision_to_dict(gate_decision)
+                        emit_decision(
+                            spine_path=spine_path,
+                            symbol=symbol,
+                            intended_hold_min=intended_hold_min,
+                            policy_id=gate_decision.policy_id,
+                            policy_defaulted=gate_decision.policy_defaulted,
+                            allowed=gate_decision.allowed,
+                            veto_reason=gate_veto_reason,
+                            blocks=decision_dict["blocks"],
+                            annotations=decision_dict["annotations"],
+                            attached_surfaces=decision_dict["attached_surfaces"],
+                            source_event_id=event_id,
+                            source_ts=timestamp,
+                        )
+
+                        if not gate_allowed:
+                            # Surface gate blocked: emit veto (abstention, not rejection)
+                            last_veto = router_state.get_last_veto_reason(symbol)
+                            if gate_veto_reason.value != last_veto:
+                                emit_veto(
+                                    spine_path=spine_path,
+                                    symbol=symbol,
+                                    veto_reason=gate_veto_reason,
+                                    source_event_id=event_id,
+                                    source_ts=timestamp,
+                                    speech_cycle=speech_cycle,
+                                )
+                                vetoes_emitted += 1
+                                window_vetoes += 1
+                                router_state.set_last_veto_reason(symbol, gate_veto_reason.value)
+                            speech_cycle.finalize()
+                            continue  # Skip intent emission
+
                     emit_intent(
                         spine_path=spine_path,
                         symbol=symbol,
@@ -563,15 +761,19 @@ def run_runtime(
                         z_std=z_std,
                         regime=regime,
                         regime_confidence=regime_confidence,
+                        speech_cycle=speech_cycle,
                     )
                     intents_emitted += 1
+                    window_intents += 1
                     router_state.set_last_allocation(symbol, result)
+            speech_cycle.finalize()
 
 
 def run_replay(
     input_spine: Path,
     output_spine: Path,
     authority_state: AuthorityState,
+    ticks_by_symbol: Optional[Dict[str, list[tuple[float, float]]]] = None,
 ) -> None:
     """
     Replay mode (determinism testing) with authority gating.
@@ -649,6 +851,16 @@ def run_replay(
                     router_state.set_last_veto_reason(symbol, result.value)
             elif isinstance(result, AllocationResult):
                 # Intent path: positive exposure authority (v0.2 allocator)
+                asof_ts = _parse_tick_timestamp(timestamp)
+                tick_prices = (
+                    _get_tick_prices(ticks_by_symbol, symbol, asof_ts)
+                    if ticks_by_symbol
+                    else None
+                )
+                z_mean = router_state.get_z_mean(symbol)
+                z_std = router_state.get_z_std(symbol)
+                regime = router_state.get_regime(symbol)
+                regime_confidence = router_state.get_regime_confidence(symbol)
 
                 # WEAK INTENT PATH: questions, not decisions
                 # - NOT gated by authority
@@ -661,6 +873,11 @@ def run_replay(
                         allocation=result,
                         source_event_id=event_id,
                         source_ts=timestamp,
+                        tick_prices=tick_prices,
+                        z_mean=z_mean,
+                        z_std=z_std,
+                        regime=regime,
+                        regime_confidence=regime_confidence,
                     )
                     # NOTE: Do NOT update router_state.set_last_allocation()
                     # Weak intents track independently from strong intents
@@ -669,16 +886,24 @@ def run_replay(
                 # STRONG INTENT PATH: decisions (GATED)
                 if result.direction != Direction.FLAT and not gated_router.can_emit_non_flat():
                     # Authority gate: emit shadow intent (counterfactual) + veto
+                    # Multi-horizon: emit one shadow per observation horizon (observability only)
                     last_allocation = router_state.get_last_allocation(symbol)
                     if should_emit_intent(result, last_allocation):
-                        emit_shadow_intent(
-                            spine_path=output_spine,
-                            symbol=symbol,
-                            allocation=result,
-                            blocked_by="authority_gate",
-                            source_event_id=event_id,
-                            source_ts=timestamp,
-                        )
+                        for horizon_min in SHADOW_OBSERVATION_HORIZONS:
+                            emit_shadow_intent(
+                                spine_path=output_spine,
+                                symbol=symbol,
+                                allocation=result,
+                                blocked_by="authority_gate",
+                                source_event_id=event_id,
+                                source_ts=timestamp,
+                                horizon_minutes=horizon_min,
+                                tick_prices=tick_prices,
+                                z_mean=z_mean,
+                                z_std=z_std,
+                                regime=regime,
+                                regime_confidence=regime_confidence,
+                            )
                         router_state.set_last_allocation(symbol, result)
 
                     last_veto = router_state.get_last_veto_reason(symbol)
@@ -701,6 +926,11 @@ def run_replay(
                         allocation=result,
                         source_event_id=event_id,
                         source_ts=timestamp,
+                        tick_prices=tick_prices,
+                        z_mean=z_mean,
+                        z_std=z_std,
+                        regime=regime,
+                        regime_confidence=regime_confidence,
                     )
                     router_state.set_last_allocation(symbol, result)
 
@@ -717,6 +947,11 @@ def main() -> None:
         nargs=2,
         metavar=("INPUT_SPINE", "OUTPUT_SPINE"),
         help="Replay mode: process input spine, write intents to output",
+    )
+    parser.add_argument(
+        "--ticks",
+        type=Path,
+        help="Tick observation JSONL (replay mode only)",
     )
     parser.add_argument(
         "--spine",
@@ -760,6 +995,30 @@ def main() -> None:
         "--soak-contract",
         type=Path,
         help="Path to SOAK_CONTRACT.json for formal soak tracking",
+    )
+    # DOCTRINE: VETO_TIMESCALE - Surface gate arguments
+    parser.add_argument(
+        "--regime-surface-stream",
+        type=Path,
+        help="Path to regime veto surface JSONL stream (live surfaces)",
+    )
+    parser.add_argument(
+        "--micro-surface-stream",
+        type=Path,
+        help="Path to micro veto surface JSONL stream (live surfaces)",
+    )
+    parser.add_argument(
+        "--surface-policy",
+        type=str,
+        choices=["P_HOLD_BLOCK_REGIME", "P_SCALP_BLOCK_MICRO", "P_UNION_SAFETY", "P_ANNOTATE_ONLY"],
+        default="P_HOLD_BLOCK_REGIME",
+        help="Surface policy to apply (default: P_HOLD_BLOCK_REGIME)",
+    )
+    parser.add_argument(
+        "--intended-hold-min",
+        type=int,
+        default=DEFAULT_HORIZON_MINUTES,
+        help=f"Intended holding period in minutes for surface evaluation (default: {DEFAULT_HORIZON_MINUTES})",
     )
 
     args = parser.parse_args()
@@ -814,9 +1073,21 @@ def main() -> None:
     if args.replay:
         input_spine = Path(args.replay[0])
         output_spine = Path(args.replay[1])
-        run_replay(input_spine, output_spine, authority_state)
+        ticks_by_symbol = None
+        if args.ticks:
+            tick_path = args.ticks.expanduser().resolve()
+            if not tick_path.exists():
+                print(f"ERROR: ticks file not found: {tick_path}", file=sys.stderr)
+                sys.exit(2)
+            ticks_by_symbol = _load_ticks_by_symbol(tick_path)
+            print(f"loaded_ticks: {tick_path}", file=sys.stderr)
+        run_replay(input_spine, output_spine, authority_state, ticks_by_symbol=ticks_by_symbol)
     else:
         use_real_kernel = not args.mock_kernel
+        # DOCTRINE: VETO_TIMESCALE - Surface cache configuration
+        regime_stream = args.regime_surface_stream.expanduser().resolve() if args.regime_surface_stream else None
+        micro_stream = args.micro_surface_stream.expanduser().resolve() if args.micro_surface_stream else None
+        surface_policy_id = PolicyId(args.surface_policy)
         run_runtime(
             args.spine,
             args.poll,
@@ -824,6 +1095,10 @@ def main() -> None:
             demotions_path,
             use_real_kernel,
             heartbeat_interval=args.heartbeat,
+            regime_stream_path=regime_stream,
+            micro_stream_path=micro_stream,
+            surface_policy_id=surface_policy_id,
+            intended_hold_min=args.intended_hold_min,
         )
 
 
