@@ -695,6 +695,7 @@ def emit_decision(
     attached_surfaces: Dict[str, Dict],
     source_event_id: str,
     source_ts: str,
+    decision_authority: Optional[str] = None,
 ) -> bool:
     """
     Append router.decision.v1 event to spine.
@@ -720,6 +721,8 @@ def emit_decision(
         attached_surfaces: Dict of surface references (regime, micro)
         source_event_id: Event ID that triggered this decision
         source_ts: Timestamp from source event
+        decision_authority: Authority level at decision time ("shadow", "weak", "real")
+                          Defaults to "real" for backward compatibility.
 
     Returns:
         True if written successfully, False on error
@@ -734,7 +737,8 @@ def emit_decision(
         "blocks": blocks,
         "annotations": annotations,
         "attached_surfaces": attached_surfaces,
-        "schema_version": "1.0",
+        "schema_version": "1.1",
+        "decision_authority": decision_authority or "real",
     }
 
     payload = canonicalize_payload(payload, skip_unknown=True)
