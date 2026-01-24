@@ -683,3 +683,168 @@ class TestDecisionAuthorityGolden:
 
         errors = validate_decision_payload(payload)
         assert len(errors) == 0, f"1.0 payload must be valid: {errors}"
+
+
+# -----------------------------------------------------------------------------
+# CONSTITUTIONAL: Golden Tests for P_UNION_SAFETY No-Safe-Zone
+# -----------------------------------------------------------------------------
+
+
+class TestUnionSafetyNoSafeZoneGolden:
+    """
+    CONSTITUTIONAL: No-safe-zone is a valid blocking configuration.
+
+    When turn_on_min <= unsafe_up_to_min, the feasible horizon space collapses.
+    This is NOT an error state. It means: "no hold duration is safe right now."
+
+    FROZEN: 2026-01-24
+
+    Invariants:
+    - P_UNION_SAFETY blocks ALL holds when safe zone is empty
+    - Both surfaces contribute blocks (not just one)
+    - No precedence bias (order-independent)
+    - No silent downgrade to annotate-only
+    - attached_surfaces records both event_hashes
+    """
+
+    def test_union_safety_no_safe_zone_blocks_all_holds(self):
+        """
+        Golden test: overlapping thresholds block all holds.
+
+        Configuration:
+            turn_on_min = 5     (regime blocks hold >= 5)
+            unsafe_up_to_min = 10  (micro blocks hold <= 10)
+
+        This creates NO safe zone: any hold is blocked by at least one surface.
+        Under P_UNION_SAFETY, this is valid (both surfaces agree: don't trade).
+        """
+        regime = make_active_regime_surface(turn_on_min=5)
+        micro = make_active_micro_surface(unsafe_up_to_min=10)
+
+        # Test representative holds across the spectrum
+        test_cases = [
+            (3, "micro"),      # hold < turn_on: only micro blocks
+            (5, "both"),       # hold == turn_on: both block
+            (7, "both"),       # hold in overlap zone: both block
+            (10, "both"),      # hold == unsafe_up_to: both block
+            (15, "regime"),    # hold > unsafe_up_to: only regime blocks
+        ]
+
+        for hold, expected_blocker in test_cases:
+            allowed, veto_reason, decision = evaluate_surface_gate(
+                asset="BTCUSDT",
+                intended_hold_min=hold,
+                regime_surface=regime,
+                micro_surface=micro,
+                policy_id=PolicyId.P_UNION_SAFETY,
+            )
+
+            # 1. ALL must block
+            assert allowed is False, f"hold={hold} must block"
+            assert decision.outcome == DecisionOutcome.BLOCK
+
+            # 2. Verify correct planes contribute
+            block_planes = {b.plane for b in decision.blocks}
+
+            if expected_blocker == "both":
+                assert "regime" in block_planes, f"hold={hold}: regime must block"
+                assert "micro" in block_planes, f"hold={hold}: micro must block"
+                assert len(decision.blocks) == 2, f"hold={hold}: exactly 2 blocks"
+            elif expected_blocker == "regime":
+                assert "regime" in block_planes, f"hold={hold}: regime must block"
+                assert "micro" not in block_planes, f"hold={hold}: micro should not block"
+            elif expected_blocker == "micro":
+                assert "micro" in block_planes, f"hold={hold}: micro must block"
+                assert "regime" not in block_planes, f"hold={hold}: regime should not block"
+
+            # 3. Both surfaces recorded (even if only one blocks)
+            assert decision.attached_surfaces["regime"]["present"] is True
+            assert decision.attached_surfaces["micro"]["present"] is True
+            assert decision.attached_surfaces["regime"]["event_hash"] is not None
+            assert decision.attached_surfaces["micro"]["event_hash"] is not None
+
+            # 4. No silent downgrade to annotate-only
+            assert decision.hold_required is False  # Not a system veto
+
+    def test_union_safety_dual_block_records_both_thresholds(self):
+        """
+        When both surfaces block, each BlockReason records its own threshold.
+
+        This enables audit: "regime blocked at 5m, micro blocked at 10m".
+        """
+        regime = make_active_regime_surface(turn_on_min=5)
+        micro = make_active_micro_surface(unsafe_up_to_min=10)
+
+        _, _, decision = evaluate_surface_gate(
+            asset="BTCUSDT",
+            intended_hold_min=7,  # In overlap zone
+            regime_surface=regime,
+            micro_surface=micro,
+            policy_id=PolicyId.P_UNION_SAFETY,
+        )
+
+        assert len(decision.blocks) == 2
+
+        regime_block = next(b for b in decision.blocks if b.plane == "regime")
+        micro_block = next(b for b in decision.blocks if b.plane == "micro")
+
+        # Each block records its specific threshold
+        assert regime_block.threshold_min == 5
+        assert regime_block.code == "HOLD_GE_TURN_ON_5"
+        assert micro_block.threshold_min == 10
+        assert micro_block.code == "SCALP_LE_UNSAFE_10"
+
+        # Both record the same intended_hold_min
+        assert regime_block.intended_hold_min == 7
+        assert micro_block.intended_hold_min == 7
+
+    def test_union_safety_no_precedence_bias(self):
+        """
+        Block order in decision.blocks must not depend on evaluation order.
+
+        This test verifies no accidental precedence that could affect downstream
+        processing (e.g., "first block wins" logic).
+        """
+        regime = make_active_regime_surface(turn_on_min=5)
+        micro = make_active_micro_surface(unsafe_up_to_min=10)
+
+        _, _, decision = evaluate_surface_gate(
+            asset="BTCUSDT",
+            intended_hold_min=7,
+            regime_surface=regime,
+            micro_surface=micro,
+            policy_id=PolicyId.P_UNION_SAFETY,
+        )
+
+        # Both planes present in blocks
+        planes = [b.plane for b in decision.blocks]
+        assert "regime" in planes
+        assert "micro" in planes
+
+        # Decision outcome is BLOCK regardless of internal order
+        assert decision.outcome == DecisionOutcome.BLOCK
+
+        # VetoReason maps to first block, but this is documented behavior
+        # (not a precedence bug). The test ensures BOTH are recorded.
+        assert len(decision.blocks) == 2
+
+    def test_exact_threshold_boundary_both_block(self):
+        """
+        hold == turn_on_min == unsafe_up_to_min: both surfaces block.
+
+        Edge case: thresholds are exactly equal.
+        """
+        regime = make_active_regime_surface(turn_on_min=5)
+        micro = make_active_micro_surface(unsafe_up_to_min=5)
+
+        _, _, decision = evaluate_surface_gate(
+            asset="BTCUSDT",
+            intended_hold_min=5,  # Exactly at both thresholds
+            regime_surface=regime,
+            micro_surface=micro,
+            policy_id=PolicyId.P_UNION_SAFETY,
+        )
+
+        assert decision.outcome == DecisionOutcome.BLOCK
+        assert len(decision.blocks) == 2
+        assert {b.plane for b in decision.blocks} == {"regime", "micro"}

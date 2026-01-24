@@ -19,6 +19,13 @@ Staleness Rules:
 - micro NO_DATA → never block, annotate MICRO_RISK_UNKNOWN
 - micro STALE/ERROR → block only under P_UNION_SAFETY, else annotate
 
+No-Safe-Zone Invariant (FROZEN 2026-01-24):
+- When turn_on_min <= unsafe_up_to_min, the feasible horizon band is EMPTY
+- Under P_UNION_SAFETY, this blocks ALL holds (both surfaces contribute)
+- This is a VALID blocking configuration, NOT an error state
+- Semantic: "no hold duration is structurally safe right now"
+- Do not "fix" this by adding precedence or fallback logic
+
 Evidence: EVT-0, EVT-1A, EVT-1B (gate2_final_2026-01-20)
 Added: 2026-01-23
 """
