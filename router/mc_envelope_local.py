@@ -390,8 +390,8 @@ def generate_mc_envelope(
     else:
         dir_onehot = [0.90, 0.05, 0.05]
 
-    # Modulate by confidence
-    # Higher confidence → sharper distribution
+    # Modulate by calibration parameter c
+    # Higher c → sharper distribution
     if side in ("LONG", "SHORT"):
         sharpness = 0.5 + 0.5 * c  # c=0 → 0.5, c=1 → 1.0
         if side == "LONG":
@@ -414,7 +414,7 @@ def generate_mc_envelope(
     dir_logits0 = [math.log(p) for p in p_dir]
 
     # Base veto probability (low for intents)
-    p_veto0 = 0.05 + 0.10 * (1 - c)  # Lower confidence → slightly higher veto
+    p_veto0 = 0.05 + 0.10 * (1 - c)  # Lower c → higher veto probability
     veto_logit0 = _logit(p_veto0)
 
     # Map horizon_minutes to H index

@@ -109,9 +109,9 @@ def make_mock_envelope(
             horizon_minutes=horizon_minutes,
         )
 
-    # Baseline: more confidence => less flat
+    # Baseline: higher c => less flat
     # Keep some minimum flatness so the mock always expresses uncertainty
-    p_flat = _clamp01(0.65 - 0.50 * c)  # confidence 0 -> 0.65 flat, confidence 1 -> 0.15 flat
+    p_flat = _clamp01(0.65 - 0.50 * c)  # c=0 → 0.65 flat, c=1 → 0.15 flat
     p_dir = _clamp01(1.0 - p_flat)
 
     side = (intent_side or "FLAT").upper()
@@ -124,7 +124,7 @@ def make_mock_envelope(
         p_long, p_short = 0.0, 0.0
         p_flat = 1.0
 
-    # Sizing band widens when confidence is low
+    # Sizing band widens when c is low
     # Keep it deterministic and bounded
     s = abs(_safe_float(size, 0.0))
     band = 0.20 + 0.60 * (1.0 - c)  # c=1 -> 0.20 band, c=0 -> 0.80 band

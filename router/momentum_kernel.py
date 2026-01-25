@@ -1,23 +1,15 @@
 """
-Momentum Kernel v0.1 - Directional Signal from Regime Drift
+Momentum Kernel v0.2 - Directional Signal from Regime Drift
 
 EPISTEMIC CONTRACT:
 - This kernel IS DIRECTIONAL. It claims direction when drift is detected.
-- Direction comes from sign(z_mean), confidence from calibrated |z_mean|.
+- Direction comes from sign(z_mean), confidence from volatility-normalized drift.
 - Only claims direction in "goldilocks zone": |z_mean| in [Z_DRIFT_MIN, Z_DRIFT_MAX]
 - Above Z_DRIFT_MAX: mean reversion dominates, no directional claim
 - Must pass EVT-0D before deployment (hit_rate >= 50%, calibration <= 0.15).
 
-Calibration Source: v0.2.2 dev data, Jan 14 2026, 60min horizon
-Key Finding: Non-monotonic calibration curve
-  |z_mean| 0.00002-0.00003 -> ~85-93% hit rate (momentum works)
-  |z_mean| 0.00003-0.00005 -> ~40% hit rate (transition zone)
-  |z_mean| 0.00005+        -> ~7% hit rate (mean reversion dominates)
-
-Why this can work where bootstrap_mc cannot:
-- z_mean is computed from ORDERED returns (preserves serial correlation)
-- Bootstrap MC shuffles returns (destroys serial correlation)
-- Drift detection is a trend-following signal, not a price distribution
+Legacy calibration notes (v0.1) are retained for provenance but are not used
+by the current scoring function.
 """
 
 from __future__ import annotations
@@ -31,8 +23,8 @@ from typing import Dict, List, Optional, Tuple
 
 # Kernel identity
 KERNEL_NAME = "momentum_v0"
-KERNEL_VERSION = "momentum_v0.1"
-KERNEL_BUILD_SHA = "momentum_v0.1.2_20260114_calibrated"  # Pass 2: flat 90% conf
+KERNEL_VERSION = "momentum_v0.2"
+KERNEL_BUILD_SHA = "momentum_v0.2_20260120_volnorm"
 
 # Epistemic contract
 KERNEL_DIRECTIONAL = True  # This kernel DOES claim directional signal
@@ -45,6 +37,8 @@ DIRECTIONAL_REGIMES = {"drift", "breakout"}
 # Optimal range: |z_mean| in [0.00002, 0.00003)
 Z_DRIFT_MIN = 0.00002     # Below this: regime classifier threshold, weak signal
 Z_DRIFT_MAX = 0.00003     # Above this: mean reversion dominates (hit rate <50%)
+SCORE_CAP = 1.0           # Volatility-normalized score at which p_dir caps
+SCORE_EPS = 1e-12         # Avoid division by zero for z_std
 
 # Analysis-only debug logging (opt-in via env var)
 _DEBUG_ENV_VAR = "SYNTHDESK_MOMENTUM_DEBUG"
@@ -72,10 +66,8 @@ class MomentumParams:
 
     z_drift_min: float = Z_DRIFT_MIN  # Minimum |z_mean| to claim direction
     z_drift_max: float = Z_DRIFT_MAX  # Maximum |z_mean| - above this, no claim
-    # EVT-0D calibration pass 2: observed 90% hit rate, use flat 0.90 confidence
-    # Previous pass had miscalibrated confidence curve (claimed 82% -> hit 40%)
-    max_confidence: float = 0.90      # Observed hit rate in goldilocks zone
-    min_confidence: float = 0.90      # Flat confidence (calibrated to reality)
+    max_confidence: float = 0.90      # Upper bound (no calibration)
+    min_confidence: float = 0.55      # Lower bound for directional claims
 
 
 @dataclass(frozen=True)
@@ -128,11 +120,10 @@ class MomentumEnvelope:
 #   [0.000028, 0.00005): n=15, hit_rate=40%  <- BELOW 50%
 #   [0.00005, 0.00016): n=14, hit_rate=7%    <- STRONGLY BELOW 50%
 #
-# Strategy: Only claim direction in bins with hit_rate >= 60%
-# Use linear interpolation within the zone, cap at observed rates
+# Legacy calibration map (v0.1, retained for provenance; unused by current scoring)
 
 CALIBRATION_MAP: List[Tuple[float, float]] = [
-    # (|z_mean| threshold, confidence)
+    # (|z_mean| threshold, calibration bin)
     # Conservative: use lower bound of observed hit rates
     (0.00002, 0.75),   # 80% observed, round down for safety
     (0.000023, 0.85),  # 93% observed, cap at max_confidence
@@ -142,16 +133,17 @@ CALIBRATION_MAP: List[Tuple[float, float]] = [
 ]
 
 
-def _lookup_confidence(abs_z_mean: float, params: MomentumParams) -> float:
+def _vol_norm_score(abs_z_mean: float, z_std: float) -> float:
+    """Compute volatility-normalized drift score."""
+    denom = z_std if z_std > SCORE_EPS else SCORE_EPS
+    return abs_z_mean / denom
+
+
+def _lookup_confidence(abs_z_mean: float, z_std: float, params: MomentumParams) -> float:
     """
-    Look up calibrated confidence for |z_mean|.
+    Compute confidence from volatility-normalized drift.
 
     Returns 0 if outside the valid momentum zone (mean reversion dominates).
-
-    CALIBRATION NOTE (v0.1.2):
-    EVT-0D showed 90% hit rate across the goldilocks zone, so we use flat
-    confidence = 0.90 for all |z_mean| in [min, max). The previous linear
-    ramp was miscalibrated (claimed 82% -> hit only 40%).
     """
     # Gate: below minimum threshold
     if abs_z_mean < params.z_drift_min:
@@ -161,9 +153,10 @@ def _lookup_confidence(abs_z_mean: float, params: MomentumParams) -> float:
     if abs_z_mean >= params.z_drift_max:
         return 0.0
 
-    # Inside goldilocks zone: use flat calibrated confidence
-    # All positions in zone get the same confidence (observed 90% hit rate)
-    return params.max_confidence
+    # Inside goldilocks zone: scale p_dir by vol-normalized score
+    score = _vol_norm_score(abs_z_mean, z_std)
+    score_norm = min(score / SCORE_CAP, 1.0)
+    return params.min_confidence + (params.max_confidence - params.min_confidence) * score_norm
 
 
 def _compute_params_hash(params: MomentumParams) -> str:
@@ -227,7 +220,7 @@ def make_momentum_envelope(
 
     in_directional_regime = regime_val.lower() in DIRECTIONAL_REGIMES
     abs_z_mean = abs(z_mean_val)
-    confidence = _lookup_confidence(abs_z_mean, params)
+    confidence = _lookup_confidence(abs_z_mean, z_std_val, params)
 
     # Gate 1: Regime must be directional
     if not in_directional_regime:
@@ -238,6 +231,8 @@ def make_momentum_envelope(
             "z_mean": z_mean_val,
             "z_std": z_std_val,
             "abs_z_mean": abs_z_mean,
+            "vol_norm_score": _vol_norm_score(abs_z_mean, z_std_val),
+            "score_cap": SCORE_CAP,
             "z_drift_min": params.z_drift_min,
             "z_drift_max": params.z_drift_max,
             "max_confidence": params.max_confidence,
@@ -261,6 +256,8 @@ def make_momentum_envelope(
             "z_mean": z_mean_val,
             "z_std": z_std_val,
             "abs_z_mean": abs_z_mean,
+            "vol_norm_score": _vol_norm_score(abs_z_mean, z_std_val),
+            "score_cap": SCORE_CAP,
             "z_drift_min": params.z_drift_min,
             "z_drift_max": params.z_drift_max,
             "max_confidence": params.max_confidence,
@@ -298,6 +295,8 @@ def make_momentum_envelope(
         "z_mean": z_mean_val,
         "z_std": z_std_val,
         "abs_z_mean": abs_z_mean,
+        "vol_norm_score": _vol_norm_score(abs_z_mean, z_std_val),
+        "score_cap": SCORE_CAP,
         "z_drift_min": params.z_drift_min,
         "z_drift_max": params.z_drift_max,
         "max_confidence": params.max_confidence,
