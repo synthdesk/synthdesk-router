@@ -4,6 +4,10 @@ Constraint layer (veto logic).
 Hard gates, not opinions.
 Pure functions only.
 
+TERMINOLOGY NOTE:
+    "confidence" = calibration-derived probability estimate (empirical, not belief)
+    "no_edge" enum value = "no directional signal detected" (frozen schema string)
+
 Surface invariants (defense-in-depth):
 - Flat direction → veto (no "flat intent")
 - Zero size with non-flat direction → veto
@@ -11,8 +15,8 @@ Surface invariants (defense-in-depth):
 - Empty rationale → add deterministic rationale
 
 Intent strength classification:
-- Weak intent (C_WEAK_MIN ≤ confidence < C_STRONG_MIN): question with directional hypothesis
-- Strong intent (confidence ≥ C_STRONG_MIN): decision with execution authority
+- Weak intent (C_WEAK_MIN ≤ p_dir < C_STRONG_MIN): question with directional hypothesis
+- Strong intent (p_dir ≥ C_STRONG_MIN): decision with execution authority
 """
 
 from enum import Enum
@@ -28,14 +32,14 @@ from router.allocator import (
 
 
 # ---------------------------
-# Confidence Thresholds (Frozen)
+# Calibrated Probability Thresholds (Frozen)
 # ---------------------------
 
-# Minimum confidence for weak intent emission
-# Below this: no edge detected, veto
+# Minimum p_dir for weak intent emission
+# Below this: no directional signal detected, veto
 C_WEAK_MIN: float = 0.15
 
-# Minimum confidence for strong intent emission
+# Minimum p_dir for strong intent emission
 # Below this but ≥ C_WEAK_MIN: weak intent (question)
 # At or above: strong intent (decision)
 C_STRONG_MIN: float = 0.50
@@ -50,7 +54,7 @@ class VetoReason(str, Enum):
 
     Semantic categories:
     - System vetoes: infrastructure issues, always "honest" by construction
-    - Edge-absent vetoes: no market signal detected, abstention (not chaos claim)
+    - Signal-absent vetoes: no market signal detected, abstention (not chaos claim)
     - Danger vetoes: market conditions unsafe, should correlate with chaos
     - Surface vetoes: veto surface blocks based on time-scale (DOCTRINE: VETO_TIMESCALE)
     """
@@ -60,10 +64,10 @@ class VetoReason(str, Enum):
     INPUT_UNAVAILABLE = "input_unavailable"  # missing or invalid inputs
     AUTHORITY_GATE = "authority_gate"  # v0.1 blocks non-flat posture
 
-    # Edge-absent vetoes (abstention, not chaos claim)
+    # Signal-absent vetoes (abstention, not chaos claim)
     REGIME_UNRESOLVED = "regime_unresolved"  # router cannot derive exposure from regime state
-    NO_EDGE = "no_edge"  # chop regime: no directional signal detected
-    CONFIDENCE_TOO_LOW = "confidence_too_low"  # confidence < C_WEAK_MIN
+    NO_EDGE = "no_edge"  # chop regime: no directional signal detected (frozen string)
+    CONFIDENCE_TOO_LOW = "confidence_too_low"  # p_dir < C_WEAK_MIN (frozen string)
 
     # Danger vetoes (should correlate with chaos)
     REGIME_VOLATILE = "regime_volatile"  # high_vol regime: excess risk
@@ -86,8 +90,8 @@ class IntentStrength(str, Enum):
     Strong intents are decisions with execution authority.
     """
 
-    WEAK = "weak"    # C_WEAK_MIN ≤ confidence < C_STRONG_MIN
-    STRONG = "strong"  # confidence ≥ C_STRONG_MIN
+    WEAK = "weak"    # C_WEAK_MIN ≤ p_dir < C_STRONG_MIN
+    STRONG = "strong"  # p_dir ≥ C_STRONG_MIN
 
 
 # Map allocator veto reasons to constitutional VetoReason
@@ -95,7 +99,7 @@ _VETO_REASON_MAP = {
     "input_unavailable": VetoReason.INPUT_UNAVAILABLE,
     "symbol_degraded": VetoReason.INPUT_UNAVAILABLE,  # Non-critical violation, auto-recovers
     "regime_unresolved": VetoReason.REGIME_UNRESOLVED,
-    "regime_chop": VetoReason.NO_EDGE,  # No edge = abstention, not chaos claim
+    "regime_chop": VetoReason.NO_EDGE,  # No directional signal = abstention, not chaos claim
     "regime_high_vol": VetoReason.REGIME_VOLATILE,  # Danger = should correlate with chaos
     # Note: Critical violations trigger authority demotion (not allocator veto)
 }
@@ -233,13 +237,13 @@ def evaluate_constraints_with_strength(
         # Surface violation → veto (fail closed)
         return (VetoReason.REGIME_UNRESOLVED, None)
 
-    # Classify intent strength based on confidence
-    # entropy_factor represents the confidence used in allocation
+    # Classify intent strength based on p_dir
+    # entropy_factor represents the calibration used in allocation
     confidence = allocation.entropy_factor
     strength = classify_intent_strength(confidence)
 
     if strength is None:
-        # Confidence too low → veto
+        # p_dir too low → veto
         return (VetoReason.CONFIDENCE_TOO_LOW, None)
 
     # Return allocation with strength classification

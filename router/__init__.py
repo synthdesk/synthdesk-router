@@ -1,5 +1,10 @@
 """Router v0.2 - Deterministic intent synthesis runtime with authority tiers."""
 
+# EMPIRICAL LANGUAGE POLICY
+# Forbidden in core comments:
+# confidence, belief, conviction, opportunity (except frozen schema docs)
+# See docs/DOCTRINE_EMPIRICAL_LANGUAGE_ONLY.md
+
 __version__ = "0.2.0"
 
 from .authority import (

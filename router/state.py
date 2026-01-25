@@ -101,7 +101,7 @@ class RouterState:
                     self.symbols[symbol] = {}
                 self.symbols[symbol]["regime"] = regime
                 self.symbols[symbol]["last_regime_ts"] = timestamp
-                # Store regime confidence for entropy computation
+                # Store regime calibration for entropy computation
                 if confidence is not None:
                     try:
                         self.symbols[symbol]["regime_confidence"] = float(confidence)
@@ -120,6 +120,15 @@ class RouterState:
                     if z_std is not None:
                         try:
                             self.symbols[symbol]["z_std"] = float(z_std)
+                        except (TypeError, ValueError):
+                            pass
+                # Extract range_norm from phase1 primitives (H-019 validated, H-014 consumer)
+                phase1 = payload.get("phase1")
+                if isinstance(phase1, dict):
+                    range_norm = phase1.get("range_norm")
+                    if range_norm is not None:
+                        try:
+                            self.symbols[symbol]["range_norm"] = float(range_norm)
                         except (TypeError, ValueError):
                             pass
                 # Auto-recovery: successful regime emission clears degraded status
@@ -187,6 +196,21 @@ class RouterState:
             Regime confidence float or None if unavailable
         """
         return self.symbols.get(symbol, {}).get("regime_confidence")
+
+    def get_range_norm(self, symbol: str) -> Optional[float]:
+        """
+        Get range_norm (normalized volatility range) for symbol.
+
+        This is the H-019 validated primitive for volatility persistence.
+        Used by H-014 for defensive sizing (context-only, not directional).
+
+        Args:
+            symbol: Symbol identifier
+
+        Returns:
+            range_norm float or None if unavailable
+        """
+        return self.symbols.get(symbol, {}).get("range_norm")
 
     def get_last_intent(self, symbol: str) -> Optional[Dict]:
         """
