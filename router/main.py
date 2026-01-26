@@ -54,9 +54,10 @@ ROUTER_VERSION = "0.2"
 # CONSTITUTIONAL: Schema hash enforcement (turns drift into boot failure)
 # v1.0 frozen: 2026-01-23 (dad3e1d2824262be)
 # v1.1 amended: 2026-01-23 (c4bdc5fe80e2d991) - added decision_authority
+# v1.2 amended: 2026-01-24 (9559ed80986fe6cd) - added classification fields
 from schemas.router_decision import ROUTER_DECISION_SCHEMA_HASH
-assert ROUTER_DECISION_SCHEMA_HASH == "c4bdc5fe80e2d991", (
-    f"Schema drift detected: expected c4bdc5fe80e2d991, got {ROUTER_DECISION_SCHEMA_HASH}"
+assert ROUTER_DECISION_SCHEMA_HASH == "9559ed80986fe6cd", (
+    f"Schema drift detected: expected 9559ed80986fe6cd, got {ROUTER_DECISION_SCHEMA_HASH}"
 )
 
 # Default spine path (configurable via CLI)
@@ -70,6 +71,7 @@ ALLOWED_EVENT_TYPES = {
     "invariant.violation",
     "market.regime",
     "market.regime_change",
+    "spectral.emit",  # effective_rank feed for risk envelope (read-only, no authority)
 }
 
 # Shadow observation horizons (minutes)

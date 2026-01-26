@@ -13,6 +13,46 @@ if TYPE_CHECKING:
     from router.allocator import AllocationResult
 
 
+# =============================================================================
+# DOCTRINE: EVIDENCE_NONACTIONABILITY
+# Router MUST NOT read, branch on, or propagate evidence confidence fields.
+# These fields are observer-only, forensic-only.
+# =============================================================================
+
+# Fields that the router must ignore (strip from payloads)
+_EVIDENCE_CONFIDENCE_FIELDS = frozenset({
+    "evidence_confidence",
+    "confidence_source",
+    "confidence_components",
+})
+
+# =============================================================================
+# RISK ENVELOPE: Effective rank staleness bound
+# If spectral.emit is older than this, treat as missing (fail-closed → rank 1)
+# =============================================================================
+MAX_EFFECTIVE_RANK_STALENESS_MS = 5 * 60 * 1000  # 5 minutes
+
+
+def _sanitize_payload(payload: Dict) -> Dict:
+    """
+    Strip evidence confidence fields from event payload.
+
+    DOCTRINE: EVIDENCE_NONACTIONABILITY
+    The router must not read or branch on these fields.
+    This is a defense-in-depth measure; perception events
+    are already filtered by ALLOWED_EVENT_TYPES.
+
+    Args:
+        payload: Event payload dict
+
+    Returns:
+        Payload with evidence confidence fields removed
+    """
+    for field in _EVIDENCE_CONFIDENCE_FIELDS:
+        payload.pop(field, None)
+    return payload
+
+
 class RouterState:
     """
     Router-local state (ephemeral, process-scoped).
@@ -46,6 +86,9 @@ class RouterState:
         self._authority_epoch_ts = authority_epoch_ts
         # Degraded symbols: non-critical violations cause posture degradation, not authority demotion
         self._degraded_symbols: set[str] = set()
+        # Effective rank cache for risk envelope (from spectral.emit, read-only)
+        self._effective_rank: Dict[str, int] = {}
+        self._effective_rank_ts_ms: Dict[str, int] = {}
 
     def update_from_event(self, event: Dict) -> None:
         """
@@ -60,6 +103,10 @@ class RouterState:
 
         if not isinstance(event_type, str) or not isinstance(payload, dict):
             return
+
+        # DOCTRINE: EVIDENCE_NONACTIONABILITY
+        # Strip evidence confidence fields before processing
+        payload = _sanitize_payload(payload)
 
         # Lifecycle events
         if event_type == "listener.start":
@@ -143,6 +190,19 @@ class RouterState:
                 self.symbols[symbol]["regime"] = to_regime
                 self.symbols[symbol]["last_regime_ts"] = timestamp
 
+        # Spectral emit: read-only cache for risk envelope (no authority)
+        elif event_type == "spectral.emit":
+            symbol = payload.get("symbol") or payload.get("pair")
+            effective_rank = payload.get("effective_rank")
+            ts_ms = payload.get("ts_ms")
+            if symbol is None or effective_rank is None or ts_ms is None:
+                return  # Ignore malformed, do not crash
+            try:
+                self._effective_rank[symbol] = int(effective_rank)
+                self._effective_rank_ts_ms[symbol] = int(ts_ms)
+            except (TypeError, ValueError):
+                pass  # Ignore bad types
+
     def get_regime(self, symbol: str) -> Optional[str]:
         """
         Get current regime for symbol.
@@ -211,6 +271,27 @@ class RouterState:
             range_norm float or None if unavailable
         """
         return self.symbols.get(symbol, {}).get("range_norm")
+
+    def get_effective_rank(self, symbol: str, now_ts_ms: int) -> Optional[int]:
+        """
+        Get effective_rank for symbol with staleness check.
+
+        Used by risk envelope for regime-conditional caps.
+        Fail-closed: returns None if missing or stale, caller must apply rank=1.
+
+        Args:
+            symbol: Symbol identifier
+            now_ts_ms: Current timestamp in milliseconds
+
+        Returns:
+            effective_rank (1 or 2) or None if unavailable/stale
+        """
+        ts = self._effective_rank_ts_ms.get(symbol)
+        if ts is None:
+            return None
+        if now_ts_ms - ts > MAX_EFFECTIVE_RANK_STALENESS_MS:
+            return None
+        return self._effective_rank.get(symbol)
 
     def get_last_intent(self, symbol: str) -> Optional[Dict]:
         """
