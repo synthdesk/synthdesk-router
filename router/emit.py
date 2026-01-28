@@ -32,7 +32,15 @@ from router.envelope_provider import (
     COMPOSITE_KERNEL_BUILD_SHA,
 )
 from schemas.router_intent import INTENT_SCHEMA_VERSION, validate_router_intent
-from synthdesk_spine.event_types import ROUTER_DECISION_V1
+from synthdesk_spine.event_types import (
+    ROUTER_DECISION_V1,
+    ROUTER_VETO,
+    ROUTER_INTENT,
+    ROUTER_INTENT_WEAK,
+    ROUTER_INTENT_SHADOW,
+    ROUTER_HEARTBEAT,
+    ROUTER_HEALTH_SUMMARY,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,7 +158,7 @@ def _emit_surface_veto(
     payload = canonicalize_payload(payload, skip_unknown=True)
 
     event = {
-        "event_type": "router.veto",
+        "event_type": ROUTER_VETO,
         "payload": payload,
         "source_event_id": source_event_id,
         "source_ts": source_ts,
@@ -273,7 +281,7 @@ def emit_intent(
     payload["intent_id"] = _compute_intent_id(payload, source_event_id)
 
     event = {
-        "event_type": "router.intent",
+        "event_type": ROUTER_INTENT,
         "payload": payload,
         "source_event_id": source_event_id,
         "source_ts": source_ts,
@@ -306,7 +314,7 @@ def emit_weak_intent(
     Append router.intent_weak event to spine.
 
     Weak intents are "questions with a directional hypothesis" - they express
-    a directional lean but lack conviction for execution authority.
+    a directional lean but posterior mass is insufficient for execution authority.
 
     Properties:
     - NOT gated by authority (questions, not decisions)
@@ -405,7 +413,7 @@ def emit_weak_intent(
     payload["intent_id"] = _compute_intent_id(payload, source_event_id)
 
     event = {
-        "event_type": "router.intent_weak",
+        "event_type": ROUTER_INTENT_WEAK,
         "payload": payload,
         "source_event_id": source_event_id,
         "source_ts": source_ts,
@@ -519,7 +527,7 @@ def emit_shadow_intent(
     payload["intent_id"] = _compute_intent_id(payload, source_event_id)
 
     event = {
-        "event_type": "router.intent_shadow",
+        "event_type": ROUTER_INTENT_SHADOW,
         "payload": payload,
         "source_event_id": source_event_id,
         "source_ts": source_ts,
@@ -568,7 +576,7 @@ def emit_veto(
     payload = canonicalize_payload(payload, skip_unknown=True)
 
     event = {
-        "event_type": "router.veto",
+        "event_type": ROUTER_VETO,
         "payload": payload,
         "source_event_id": source_event_id,
         "source_ts": source_ts,
@@ -623,7 +631,7 @@ def emit_heartbeat(
         payload["soak_contract_hash"] = _SOAK_CONTRACT_HASH
 
     event = {
-        "event_type": "router.heartbeat",
+        "event_type": ROUTER_HEARTBEAT,
         "timestamp": now.isoformat(),
         "payload": payload,
     }
@@ -674,7 +682,7 @@ def emit_health_summary(
         payload["intent_veto_ratio"] = round(intents_in_window / vetoes_in_window, 2)
 
     event = {
-        "event_type": "router.health_summary",
+        "event_type": ROUTER_HEALTH_SUMMARY,
         "timestamp": now.isoformat(),
         "payload": payload,
     }
@@ -696,6 +704,9 @@ def emit_decision(
     source_event_id: str,
     source_ts: str,
     decision_authority: Optional[str] = None,
+    conflict_class: Optional[str] = None,
+    dominant_plane: Optional[str] = None,
+    conflict_score: Optional[float] = None,
 ) -> bool:
     """
     Append router.decision.v1 event to spine.
@@ -723,10 +734,29 @@ def emit_decision(
         source_ts: Timestamp from source event
         decision_authority: Authority level at decision time ("shadow", "weak", "real")
                           Defaults to "real" for backward compatibility.
+        conflict_class: Classification of surface plane agreement/disagreement (1.2+)
+        dominant_plane: Plane that determined outcome, if applicable (1.2+)
+        conflict_score: Conflict intensity 0.0-1.0 (1.2+)
 
     Returns:
         True if written successfully, False on error
     """
+    # Auto-compute classification if not provided (Amendment 1.2)
+    if conflict_class is None and conflict_score is None and dominant_plane is None:
+        from schemas.router_decision import compute_conflict_classification
+
+        regime_present = attached_surfaces.get("regime", {}).get("present", False)
+        micro_present = attached_surfaces.get("micro", {}).get("present", False)
+        regime_would_block = any(b.get("plane") == "regime" for b in blocks)
+        micro_would_block = any(b.get("plane") == "micro" for b in blocks)
+
+        conflict_class, dominant_plane, conflict_score = compute_conflict_classification(
+            regime_present=regime_present,
+            regime_would_block=regime_would_block,
+            micro_present=micro_present,
+            micro_would_block=micro_would_block,
+        )
+
     payload = {
         "symbol": symbol,
         "intended_hold_min": intended_hold_min,
@@ -737,8 +767,11 @@ def emit_decision(
         "blocks": blocks,
         "annotations": annotations,
         "attached_surfaces": attached_surfaces,
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "decision_authority": decision_authority or "real",
+        "conflict_class": conflict_class,
+        "dominant_plane": dominant_plane,
+        "conflict_score": conflict_score,
     }
 
     payload = canonicalize_payload(payload, skip_unknown=True)

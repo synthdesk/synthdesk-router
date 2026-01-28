@@ -47,6 +47,10 @@ from router.surface_policy import PolicyId, decision_to_dict
 from router.envelope_provider import TickBuffer
 from router.spine_reader import SpineReader
 from router.state import RouterState
+from synthdesk_spine.event_types import (
+    PERCEPTION_PRICE_LIVENESS,
+    ROUTER_AUTHORITY_DEMOTION,
+)
 
 # Version
 ROUTER_VERSION = "0.2"
@@ -212,19 +216,27 @@ class TickWatcher:
     This prevents future data leakage when router replays historical events.
 
     Tick files are daily: runs/0.2.0/YYYY-MM-DD/tick_observation.jsonl
+
+    Also emits perception.price_liveness events to the spine for each
+    ingested tick. This is infrastructure telemetry (fact pulse), not
+    epistemic judgment. See: PERCEPTION_PRICE_LIVENESS event type.
     """
 
-    def __init__(self, runs_dir: Path, tick_buffer: TickBuffer):
+    def __init__(self, runs_dir: Path, tick_buffer: TickBuffer, spine_path: Optional[Path] = None):
         """
         Initialize tick watcher.
 
         Args:
             runs_dir: Path to runs/0.2.0 directory
             tick_buffer: Buffer to populate with ticks (must store timestamps)
+            spine_path: Path to event_spine.jsonl for price liveness emission.
+                       None = no liveness emission (e.g. unit tests).
         """
         self.runs_dir = runs_dir
         self.tick_buffer = tick_buffer
+        self.spine_path = spine_path
         self._last_positions: Dict[Path, int] = {}
+        self._liveness_seq: int = 0
 
     def _get_today_tick_file(self) -> Optional[Path]:
         """Get path to today's tick file."""
@@ -271,6 +283,7 @@ class TickWatcher:
                         if isinstance(symbol, str) and isinstance(price, (int, float)):
                             self.tick_buffer.add_tick(symbol, ts_epoch, float(price))
                             count += 1
+                            self._emit_price_liveness(symbol, ts_str)
                     except json.JSONDecodeError:
                         continue
                 self._last_positions[tick_file] = f.tell()
@@ -278,6 +291,35 @@ class TickWatcher:
             pass
 
         return count
+
+    def _emit_price_liveness(self, asset: str, price_ts_str: str) -> None:
+        """
+        Emit a perception.price_liveness event to the spine.
+
+        Infrastructure telemetry: "a price was seen at time t".
+        No epistemic judgment. No predicate semantics.
+        """
+        if self.spine_path is None:
+            return
+        recv_ts = datetime.now(timezone.utc).isoformat()
+        self._liveness_seq += 1
+        event = {
+            "event_type": PERCEPTION_PRICE_LIVENESS,
+            "timestamp": recv_ts,
+            "payload": {
+                "asset": asset,
+                "price_ts": price_ts_str,
+                "recv_ts": recv_ts,
+                "venue": "tick_observation_jsonl",
+                "seq": self._liveness_seq,
+            },
+        }
+        try:
+            with self.spine_path.open("a", encoding="utf-8") as f:
+                f.write(json.dumps(event, sort_keys=True) + "\n")
+                f.flush()
+        except OSError:
+            pass
 
 
 def emit_demotion_event(
@@ -310,7 +352,7 @@ def emit_demotion_event(
 
     # Spine event (canonical)
     spine_event = {
-        "event_type": "router.authority_demotion",
+        "event_type": ROUTER_AUTHORITY_DEMOTION,
         "timestamp": timestamp,
         "payload": {
             "from_level": str(from_level),
@@ -445,7 +487,7 @@ def run_runtime(
     # Setup tick buffer and watcher for real MC kernel
     tick_buffer = TickBuffer(max_size=1200)  # ~20 minutes at 1 tick/sec
     runs_dir = spine_path.parent  # Assume spine is in runs/0.2.0/
-    tick_watcher = TickWatcher(runs_dir, tick_buffer)
+    tick_watcher = TickWatcher(runs_dir, tick_buffer, spine_path=spine_path)
     router_runs_root = Path(__file__).resolve().parents[1] / "runs"
     speech_counters = SpeechCounters(runs_root=router_runs_root)
     atexit.register(speech_counters.flush)
