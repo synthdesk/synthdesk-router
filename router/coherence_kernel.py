@@ -21,6 +21,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+from synthdesk_spine.event_types import COHERENCE_STATE
+
 # Kernel build SHA for lineage tracking
 _SOURCE = Path(__file__).read_text()
 KERNEL_BUILD_SHA = hashlib.sha256(_SOURCE.encode()).hexdigest()[:16]
@@ -198,7 +200,7 @@ def coherence_result_to_event(result: CoherenceResult) -> Dict:
     Event type: coherence.state
     """
     return {
-        "event_type": "coherence.state",
+        "event_type": COHERENCE_STATE,
         "timestamp": result.eval_ts.isoformat(),
         "payload": {
             "state": result.state.value,

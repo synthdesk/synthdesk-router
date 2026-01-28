@@ -29,6 +29,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from router.emit import get_router_build_sha, get_soak_contract_hash
+from synthdesk_spine.event_types import INVARIANT_VIOLATION
 
 # Risk envelope for regime-conditional caps (court-frozen, no authority)
 try:
@@ -535,7 +536,7 @@ def _make_violation_event(
 ) -> Dict:
     """Create invariant.violation event for cap breach."""
     event = {
-        "event_type": "invariant.violation",
+        "event_type": INVARIANT_VIOLATION,
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "payload": {
             "violation_type": "paper_execution_cap_breach",
