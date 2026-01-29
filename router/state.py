@@ -9,6 +9,18 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, Dict, Optional
 
+from synthdesk_spine.event_types import (
+    GOVERNANCE_EVIDENCE_EXPIRED,
+    INVARIANT_DRIFT_CRITICAL,
+    INVARIANT_DRIFT_WARNING,
+    INVARIANT_VIOLATION,
+    LISTENER_CRASH,
+    LISTENER_START,
+    MARKET_REGIME,
+    MARKET_REGIME_CHANGE,
+    SPECTRAL_EMIT,
+)
+
 if TYPE_CHECKING:
     from router.allocator import AllocationResult
 
@@ -109,37 +121,41 @@ class RouterState:
         payload = _sanitize_payload(payload)
 
         # Lifecycle events
-        if event_type == "listener.start":
+        if event_type == LISTENER_START:
             self.system["listener_alive"] = True
             self.system["last_listener_event_ts"] = timestamp
 
-        elif event_type == "listener.crash":
+        elif event_type == LISTENER_CRASH:
             self.system["listener_alive"] = False
             self.system["last_listener_event_ts"] = timestamp
 
         # Invariant violations (epoch-scoped, passive recording)
         # State records ALL violations within epoch. Authority plane decides demotion policy.
-        elif event_type == "invariant.violation":
+        elif event_type in (INVARIANT_VIOLATION, INVARIANT_DRIFT_WARNING, INVARIANT_DRIFT_CRITICAL):
             # Only record violations within the current authority epoch.
-            # Pre-epoch violations cannot affect a later authority binding.
             if self._authority_epoch_ts is None or timestamp >= self._authority_epoch_ts:
                 severity = payload.get("severity", "warning")
-                symbol = payload.get("details", {}).get("observed", {}).get("missing_pairs", [None])[0]
+                symbol = payload.get("symbol") or payload.get("details", {}).get("symbol")
                 if not symbol:
-                    # Try alternate payload shapes
-                    symbol = payload.get("symbol")
+                    symbol = payload.get("details", {}).get("observed", {}).get("missing_pairs", [None])[0]
 
-                # Record the violation (passive memory)
                 self.system["last_violation_ts"] = timestamp
                 self.system["last_violation_severity"] = severity
                 self.system["last_violation_symbol"] = symbol
 
-                # Track degraded symbols for non-critical violations (posture gating)
                 if severity != "critical" and symbol:
                     self._degraded_symbols.add(symbol)
 
+        elif event_type == GOVERNANCE_EVIDENCE_EXPIRED:
+            if self._authority_epoch_ts is None or timestamp >= self._authority_epoch_ts:
+                severity = payload.get("severity", "critical")
+                symbol = payload.get("descriptor_id") or "governance"
+                self.system["last_violation_ts"] = timestamp
+                self.system["last_violation_severity"] = severity
+                self.system["last_violation_symbol"] = symbol
+
         # Market regime updates (also clears degraded status - auto-recovery)
-        elif event_type == "market.regime":
+        elif event_type == MARKET_REGIME:
             symbol = payload.get("symbol")
             regime = payload.get("regime")
             confidence = payload.get("confidence")
@@ -181,7 +197,7 @@ class RouterState:
                 # Auto-recovery: successful regime emission clears degraded status
                 self._degraded_symbols.discard(symbol)
 
-        elif event_type == "market.regime_change":
+        elif event_type == MARKET_REGIME_CHANGE:
             symbol = payload.get("symbol")
             to_regime = payload.get("to")
             if isinstance(symbol, str) and isinstance(to_regime, str):
@@ -191,7 +207,7 @@ class RouterState:
                 self.symbols[symbol]["last_regime_ts"] = timestamp
 
         # Spectral emit: read-only cache for risk envelope (no authority)
-        elif event_type == "spectral.emit":
+        elif event_type == SPECTRAL_EMIT:
             symbol = payload.get("symbol") or payload.get("pair")
             effective_rank = payload.get("effective_rank")
             ts_ms = payload.get("ts_ms")
