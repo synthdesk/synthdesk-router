@@ -48,8 +48,14 @@ from router.envelope_provider import TickBuffer
 from router.spine_reader import SpineReader
 from router.state import RouterState
 from synthdesk_spine.event_types import (
+    INVARIANT_VIOLATION,
+    LISTENER_CRASH,
+    LISTENER_START,
+    MARKET_REGIME,
+    MARKET_REGIME_CHANGE,
     PERCEPTION_PRICE_LIVENESS,
     ROUTER_AUTHORITY_DEMOTION,
+    SPECTRAL_EMIT,
 )
 
 # Version
@@ -70,12 +76,12 @@ DEFAULT_POLL_INTERVAL = 1.0
 
 # Event types the router consumes
 ALLOWED_EVENT_TYPES = {
-    "listener.start",
-    "listener.crash",
-    "invariant.violation",
-    "market.regime",
-    "market.regime_change",
-    "spectral.emit",  # effective_rank feed for risk envelope (read-only, no authority)
+    LISTENER_START,
+    LISTENER_CRASH,
+    INVARIANT_VIOLATION,
+    MARKET_REGIME,
+    MARKET_REGIME_CHANGE,
+    SPECTRAL_EMIT,  # effective_rank feed for risk envelope (read-only, no authority)
 }
 
 # Shadow observation horizons (minutes)
@@ -603,11 +609,11 @@ def run_runtime(
             last_event_ts = timestamp
         # Track window counters for health summary
         window_events += 1
-        if event_type in ("market.regime", "market.regime_change"):
+        if event_type in (MARKET_REGIME, MARKET_REGIME_CHANGE):
             symbol = payload.get("symbol") if isinstance(payload, dict) else None
             if isinstance(symbol, str):
                 window_per_symbol[symbol] = window_per_symbol.get(symbol, 0) + 1
-        if event_type == "invariant.violation":
+        if event_type == INVARIANT_VIOLATION:
             window_violations += 1
 
         # Update state from event
@@ -619,13 +625,13 @@ def run_runtime(
         # Synthesize intent for symbols affected by this event
         symbols_to_check = set()
 
-        if event_type in ("market.regime", "market.regime_change"):
+        if event_type in (MARKET_REGIME, MARKET_REGIME_CHANGE):
             symbol = payload.get("symbol") if isinstance(payload, dict) else None
             if isinstance(symbol, str):
                 symbols_to_check.add(symbol)
 
         # System-wide events affect all symbols
-        if event_type in ("listener.start", "listener.crash", "invariant.violation"):
+        if event_type in (LISTENER_START, LISTENER_CRASH, INVARIANT_VIOLATION):
             symbols_to_check.update(router_state.symbols.keys())
 
         # Synthesize and emit (XOR: intent or veto, never both)
@@ -929,13 +935,13 @@ def run_replay(
         # Synthesize intent for symbols affected by this event
         symbols_to_check = set()
 
-        if event_type in ("market.regime", "market.regime_change"):
+        if event_type in (MARKET_REGIME, MARKET_REGIME_CHANGE):
             symbol = payload.get("symbol") if isinstance(payload, dict) else None
             if isinstance(symbol, str):
                 symbols_to_check.add(symbol)
 
         # System-wide events affect all symbols
-        if event_type in ("listener.start", "listener.crash", "invariant.violation"):
+        if event_type in (LISTENER_START, LISTENER_CRASH, INVARIANT_VIOLATION):
             symbols_to_check.update(router_state.symbols.keys())
 
         # Synthesize and emit (XOR: intent or veto, never both)
