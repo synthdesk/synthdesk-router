@@ -1,0 +1,16 @@
+# Runtime/state
+runs/
+soak_artifacts/
+artifacts/
+analysis/
+state/
+
+# Build/cache
+*.pyc
+__pycache__/
+*.egg-info/
+.pytest_cache/
+
+# Local env
+.venv/
+venv/

@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=65"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "synthdesk-router"
+version = "0.1.0"
+description = "Synthdesk Router + Observer packages"
+requires-python = ">=3.9"
+
+[tool.setuptools]
+packages = [
+  "router",
+  "router.utils",
+  "observer",
+  "observer.flow",
+]
+
+[tool.setuptools.package-dir]
+router = "router"
+observer = "packages/observer"
