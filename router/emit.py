@@ -40,6 +40,7 @@ from synthdesk_spine.event_types import (
     ROUTER_INTENT_SHADOW,
     ROUTER_HEARTBEAT,
     ROUTER_HEALTH_SUMMARY,
+    ROUTER_PORTFOLIO_V0,
 )
 
 logger = logging.getLogger(__name__)
@@ -687,6 +688,28 @@ def emit_health_summary(
         "payload": payload,
     }
 
+    return _write_event(spine_path, event)
+
+
+def emit_portfolio_summary(
+    spine_path: Path,
+    summary: Dict[str, Any],
+    source_event_id: str,
+    source_ts: str,
+) -> bool:
+    """
+    Append router.portfolio.v0 event to spine.
+
+    Emitted once per cycle when portfolio adjustment runs.
+    This is an observability event only (no execution semantics).
+    """
+    payload = canonicalize_payload(summary, skip_unknown=True)
+    event = {
+        "event_type": ROUTER_PORTFOLIO_V0,
+        "payload": payload,
+        "source_event_id": source_event_id,
+        "source_ts": source_ts,
+    }
     return _write_event(spine_path, event)
 
 
