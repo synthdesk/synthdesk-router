@@ -35,6 +35,7 @@ from pathlib import Path
 
 from observer.flow.flow_pressure_v0 import FlowPressureV0
 from router.utils.disk import DiskGuard
+from synthdesk_spine.event_types import OBSERVER_FLOW_PRESSURE_V0
 
 _disk_guard = DiskGuard()
 
@@ -99,7 +100,7 @@ def write_event(out_path: Path, payload: dict) -> None:
     if _disk_guard.should_skip():
         return
     event = {
-        "event_type": "observer.flow.pressure_v0",
+        "event_type": OBSERVER_FLOW_PRESSURE_V0,
         "schema_version": "1.0",
         "version": VERSION,
         "obs_ts": datetime.now(timezone.utc).isoformat(),
