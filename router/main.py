@@ -270,7 +270,8 @@ def _apply_portfolio_allocation(
     - rationale appends audit tags
     - fail-closed: missing context degrades to no-op
     """
-    if not _env_flag("ROUTER_PORTFOLIO_ENABLE", "1"):
+    # Feature-gated: default OFF; must be explicitly enabled per host.
+    if not _env_flag("ROUTER_PORTFOLIO_ENABLE", "0"):
         return
 
     raw_allocations: Dict[str, AllocationResult] = {}
