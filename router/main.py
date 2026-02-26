@@ -131,6 +131,8 @@ CRITICAL_SOURCE_FILES = [
     # Schemas
     "packages/router/schemas/router_intent.py",
     "packages/router/schemas/router_decision.py",
+    # Event type law (constitutional namespace)
+    "packages/router/synthdesk_spine/event_types.py",
 ]
 
 
