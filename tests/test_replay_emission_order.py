@@ -2,6 +2,7 @@
 Replay determinism and emission ordering invariants.
 """
 
+from collections import Counter
 import json
 import random
 from pathlib import Path
@@ -103,3 +104,7 @@ def test_replay_is_byte_identical_and_listener_emits_sorted_symbols(monkeypatch,
     emitted_symbols = [row["payload"]["symbol"] for row in listener_events]
     assert len(emitted_symbols) == len(symbols)
     assert emitted_symbols == sorted(symbols)
+
+    counts = Counter(emitted_symbols)
+    for symbol in symbols:
+        assert counts[symbol] <= 1

@@ -70,3 +70,13 @@ Fail-closed semantics when enabled:
 - Epistemic adjunct: disabled by default.
 - Horizon adjunct: disabled by default.
 - Portfolio pass: disabled by default (explicit host enable required).
+
+## Rollout Plan
+
+1. Deploy code with `ROUTER_PORTFOLIO_ENABLE=0` for 24h (baseline/no behavior change).
+2. Enable on one host with `ROUTER_PORTFOLIO_ENABLE=1` and observe for 1h.
+3. Confirm invariants from emitted intents:
+   - direction unchanged
+   - only size changes
+   - total exposure cap holds (`sum(size_pct_q) <= 10000`)
+4. Expand rollout host-by-host after invariant checks pass.

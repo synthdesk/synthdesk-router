@@ -22,6 +22,7 @@ from router.paper_executor import (
     PAPER_CAPITAL,
     BASE_MAX_GROSS_EXPOSURE,
     BASE_MAX_NOTIONAL_PER_TRADE,
+    _ENVELOPE_AVAILABLE,
 )
 
 
@@ -96,6 +97,10 @@ class TestRouterStateEffectiveRank:
         assert state.get_effective_rank("BTCUSDT", now_ms) is None
 
 
+@pytest.mark.skipif(
+    not _ENVELOPE_AVAILABLE,
+    reason="risk envelope package unavailable in standalone router repository",
+)
 class TestCheckCapsEnvelopeIntegration:
     """Test check_caps uses envelope-driven limits."""
 
