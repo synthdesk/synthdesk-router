@@ -8,7 +8,6 @@ version = "0.2.0"
 description = "Constitutional restraint engine - epistemic state synthesis runtime"
 requires-python = ">=3.11"
 dependencies = [
-    "synthdesk-spine>=0.1.0",
     "cryptography>=41.0.0",
 ]
 
@@ -21,6 +20,8 @@ packages = [
   "router.utils",
   "observer",
   "observer.flow",
+  "synthdesk_spine",
+  "synthdesk_spine.payloads",
 ]
 
 [tool.setuptools.package-dir]
