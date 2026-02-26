@@ -1,0 +1,98 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "regime.tag.v1",
+  "title": "Regime Tag Event (v1)",
+  "description": "Transition-only emission of durable market state descriptor. Metadata, not math.",
+  "type": "object",
+  "required": [
+    "event_type",
+    "ts",
+    "tag",
+    "prior_tag",
+    "trigger_context",
+    "provenance",
+    "min_valid_until"
+  ],
+  "properties": {
+    "event_type": {
+      "const": "regime.tag"
+    },
+    "ts": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO8601 timestamp of transition"
+    },
+    "tag": {
+      "type": "string",
+      "enum": [
+        "REGIME_LOW_DIVERSIFICATION",
+        "REGIME_MACRO_DOMINANT",
+        "REGIME_SINGLE_FACTOR_STRESS",
+        "REGIME_CROSS_ASSET_LOCKSTEP"
+      ],
+      "description": "New regime tag (closed enum in v1)"
+    },
+    "prior_tag": {
+      "type": ["string", "null"],
+      "enum": [
+        "REGIME_LOW_DIVERSIFICATION",
+        "REGIME_MACRO_DOMINANT",
+        "REGIME_SINGLE_FACTOR_STRESS",
+        "REGIME_CROSS_ASSET_LOCKSTEP",
+        null
+      ],
+      "description": "Previous regime tag (null if first emission)"
+    },
+    "trigger_context": {
+      "type": "object",
+      "required": ["distinct_alert_contexts", "horizon_hours"],
+      "properties": {
+        "distinct_alert_contexts": {
+          "type": "integer",
+          "minimum": 2,
+          "description": "Count of distinct spectral.alert contexts in horizon"
+        },
+        "horizon_hours": {
+          "type": "number",
+          "description": "Evaluation window size in hours"
+        },
+        "alert_summary": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "context": { "type": "string" },
+              "count": { "type": "integer" }
+            }
+          },
+          "description": "Optional breakdown of alerts by context"
+        }
+      }
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["input_segment_hash", "cursor_offset", "state_hash"],
+      "properties": {
+        "input_segment_hash": {
+          "type": "string",
+          "description": "SHA256 hash of input events consumed for this evaluation"
+        },
+        "cursor_offset": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Last-read byte offset in input stream"
+        },
+        "state_hash": {
+          "type": "string",
+          "description": "SHA256 hash of internal state at transition"
+        }
+      }
+    },
+    "min_valid_until": {
+      "type": "string",
+      "format": "date-time",
+      "description": "Earliest time this tag may be superseded (operator-selected duration from ts)"
+    }
+  },
+  "additionalProperties": false
+}

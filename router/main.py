@@ -18,6 +18,7 @@ import atexit
 from bisect import bisect_right
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import time
@@ -39,6 +40,7 @@ from router.constraints import (
     evaluate_constraints_with_strength,
     should_emit_intent,
 )
+from router.portfolio import portfolio_allocate, build_correlation_matrix_from_state
 from emission.speech_counters import INVALID_TIMESTAMP, OTHER_INVARIANT_FAIL, SpeechCounters
 from router.emit import emit_intent, emit_shadow_intent, emit_veto, emit_weak_intent, emit_heartbeat, emit_health_summary, emit_decision, set_router_build_sha, set_soak_contract_hash
 from router.envelope import DEFAULT_HORIZON_MINUTES
@@ -64,10 +66,10 @@ ROUTER_VERSION = "0.2"
 # CONSTITUTIONAL: Schema hash enforcement (turns drift into boot failure)
 # v1.0 frozen: 2026-01-23 (dad3e1d2824262be)
 # v1.1 amended: 2026-01-23 (c4bdc5fe80e2d991) - added decision_authority
-# v1.2 amended: 2026-01-24 (9559ed80986fe6cd) - added classification fields
+# v1.2 amended: 2026-01-24 (aa89ee67ccf3083e) - added classification fields
 from schemas.router_decision import ROUTER_DECISION_SCHEMA_HASH
-assert ROUTER_DECISION_SCHEMA_HASH == "9559ed80986fe6cd", (
-    f"Schema drift detected: expected 9559ed80986fe6cd, got {ROUTER_DECISION_SCHEMA_HASH}"
+assert ROUTER_DECISION_SCHEMA_HASH == "aa89ee67ccf3083e", (
+    f"Schema drift detected: expected aa89ee67ccf3083e, got {ROUTER_DECISION_SCHEMA_HASH}"
 )
 
 # Default spine path (configurable via CLI)
@@ -102,6 +104,10 @@ CRITICAL_SOURCE_FILES = [
     "packages/router/router/emit.py",
     # Epistemic allocator (v0.2)
     "packages/router/router/allocator.py",
+    "packages/router/router/portfolio.py",
+    "packages/router/router/cross_asset.py",
+    "packages/router/router/epistemic.py",
+    "packages/router/router/horizon.py",
     # Authority management
     "packages/router/router/authority.py",
     "packages/router/router/signing.py",
@@ -109,6 +115,7 @@ CRITICAL_SOURCE_FILES = [
     "packages/router/router/public_key.b64",
     # Schemas
     "packages/router/schemas/router_intent.py",
+    "packages/router/schemas/router_decision.py",
 ]
 
 
@@ -212,6 +219,117 @@ def _get_tick_prices(
     idx = bisect_right(ticks, (asof_ts, float("inf")))
     start = max(0, idx - max_n)
     return [price for _, price in ticks[start:idx]]
+
+
+def _env_flag(name: str, default: str = "1") -> bool:
+    """
+    Deterministic environment flag parser.
+
+    Truthy: 1/true/yes/on
+    Falsy: 0/false/no/off/empty
+    """
+    raw = os.environ.get(name, default)
+    if raw is None:
+        return False
+    value = str(raw).strip().lower()
+    if value in ("0", "false", "no", "off", ""):
+        return False
+    return True
+
+
+def _choose_portfolio_anchor(symbol_allocations: Dict[str, AllocationResult]) -> str:
+    """
+    Choose anchor symbol for correlation penalty.
+
+    Preference order:
+    1) ROUTER_PORTFOLIO_ANCHOR_SYMBOL (if present in current allocation set)
+    2) Common BTC symbols
+    3) Largest allocation in this cycle
+    """
+    env_anchor = os.environ.get("ROUTER_PORTFOLIO_ANCHOR_SYMBOL")
+    if env_anchor and env_anchor in symbol_allocations:
+        return env_anchor
+
+    for candidate in ("BTCUSDT", "BTC-USD", "BTCUSD", "XBTUSD"):
+        if candidate in symbol_allocations:
+            return candidate
+
+    return max(symbol_allocations.items(), key=lambda kv: kv[1].size_pct_q)[0]
+
+
+def _apply_portfolio_allocation(
+    state_dict: Dict[str, Any],
+    per_symbol: Dict[str, tuple[Any, Optional[IntentStrength], Any]],
+) -> None:
+    """
+    Mutate per_symbol in-place: apply correlation penalty + 100% total exposure cap.
+
+    Contract:
+    - no direction changes
+    - only size_pct_q changes
+    - rationale appends audit tags
+    - fail-closed: missing context degrades to no-op
+    """
+    # Feature-gated: default OFF; must be explicitly enabled per host.
+    if not _env_flag("ROUTER_PORTFOLIO_ENABLE", "0"):
+        return
+
+    raw_allocations: Dict[str, AllocationResult] = {}
+    for symbol, (result, _strength, _speech) in per_symbol.items():
+        if (
+            isinstance(result, AllocationResult)
+            and result.direction != Direction.FLAT
+            and result.size_pct_q > 0
+        ):
+            raw_allocations[symbol] = result
+
+    if len(raw_allocations) < 2:
+        return
+
+    anchor_symbol = _choose_portfolio_anchor(raw_allocations)
+    symbols = [anchor_symbol] + sorted(s for s in raw_allocations if s != anchor_symbol)
+    corr_matrix = build_correlation_matrix_from_state(state_dict, symbols)
+    portfolio = portfolio_allocate(raw_allocations, corr_matrix, anchor_symbol=anchor_symbol)
+
+    for symbol, sym_alloc in portfolio.allocations.items():
+        if symbol not in raw_allocations:
+            continue
+
+        original = raw_allocations[symbol]
+        new_size_q = sym_alloc.adjusted_size_q
+        clamp_tag = None
+
+        # Avoid non-flat allocations being rounded to zero.
+        if original.size_pct_q > 0 and new_size_q == 0:
+            new_size_q = 1
+            clamp_tag = "portfolio:zero_clamped_to_1"
+
+        rationale = list(original.rationale)
+        rationale.append(f"portfolio_anchor={anchor_symbol}")
+        for item in sym_alloc.rationale:
+            rationale.append(f"portfolio:{item}")
+        if portfolio.exposure_cap_applied:
+            rationale.append("portfolio:exposure_cap_applied")
+        if clamp_tag is not None:
+            rationale.append(clamp_tag)
+
+        updated = AllocationResult(
+            direction=original.direction,
+            size_pct_q=new_size_q,
+            size_pct_scale=original.size_pct_scale,
+            risk_cap=original.risk_cap,
+            rationale=rationale,
+            base_allocation_q=original.base_allocation_q,
+            entropy_factor=original.entropy_factor,
+            uncertainty_discount=original.uncertainty_discount,
+            final_factor=original.final_factor,
+            epistemic_discount=original.epistemic_discount,
+            epistemic_rationale=original.epistemic_rationale,
+            epistemic_metadata=original.epistemic_metadata,
+        )
+
+        _, strength, speech_cycle = per_symbol[symbol]
+        per_symbol[symbol] = (updated, strength, speech_cycle)
 
 
 class TickWatcher:
@@ -635,8 +753,18 @@ def run_runtime(
             symbols_to_check.update(router_state.symbols.keys())
 
         # Synthesize and emit (XOR: intent or veto, never both)
+        # Sort symbols for deterministic emission order.
+        symbols_order = sorted(symbols_to_check)
         emit_allowed = isinstance(event_id, str) and isinstance(timestamp, str)
-        for symbol in symbols_to_check:
+        state_dict = {
+            "system": router_state.system,
+            "symbols": router_state.symbols,
+            "degraded_symbols": router_state.get_degraded_symbols(),
+        }
+        per_symbol: Dict[str, tuple[Any, Optional[IntentStrength], Any]] = {}
+
+        # Phase 1: evaluate constraints.
+        for symbol in symbols_order:
             speech_cycle = speech_counters.tick()
             if not emit_allowed:
                 if not isinstance(timestamp, str):
@@ -645,14 +773,18 @@ def run_runtime(
                     speech_cycle.observe(None, OTHER_INVARIANT_FAIL)
                 speech_cycle.finalize()
                 continue
-
-            # Evaluate constraints → intent or veto reason, with strength classification
-            state_dict = {
-                "system": router_state.system,
-                "symbols": router_state.symbols,
-                "degraded_symbols": router_state.get_degraded_symbols(),
-            }
             result, intent_strength = evaluate_constraints_with_strength(state_dict, symbol)
+            per_symbol[symbol] = (result, intent_strength, speech_cycle)
+
+        # Phase 2: portfolio-level adjustment (correlation penalty + 100% cap).
+        _apply_portfolio_allocation(state_dict, per_symbol)
+
+        # Phase 3: emit according to authority + surface gates.
+        for symbol in symbols_order:
+            entry = per_symbol.get(symbol)
+            if entry is None:
+                continue
+            result, intent_strength, speech_cycle = entry
 
             # Get tick prices for real envelope (if enabled)
             # CRITICAL: Pass asof_ts to enforce tick_ts <= event_ts constraint
@@ -945,18 +1077,28 @@ def run_replay(
             symbols_to_check.update(router_state.symbols.keys())
 
         # Synthesize and emit (XOR: intent or veto, never both)
+        symbols_order = sorted(symbols_to_check)
         emit_allowed = isinstance(event_id, str) and isinstance(timestamp, str)
-        for symbol in symbols_to_check:
-            if not emit_allowed:
-                continue
+        if not emit_allowed:
+            continue
 
-            # Evaluate constraints → intent or veto reason, with strength classification
-            state_dict = {
-                "system": router_state.system,
-                "symbols": router_state.symbols,
-                "degraded_symbols": router_state.get_degraded_symbols(),
-            }
+        state_dict = {
+            "system": router_state.system,
+            "symbols": router_state.symbols,
+            "degraded_symbols": router_state.get_degraded_symbols(),
+        }
+        per_symbol: Dict[str, tuple[Any, Optional[IntentStrength], Any]] = {}
+        for symbol in symbols_order:
             result, intent_strength = evaluate_constraints_with_strength(state_dict, symbol)
+            per_symbol[symbol] = (result, intent_strength, None)
+
+        _apply_portfolio_allocation(state_dict, per_symbol)
+
+        for symbol in symbols_order:
+            entry = per_symbol.get(symbol)
+            if entry is None:
+                continue
+            result, intent_strength, _ = entry
 
             if isinstance(result, VetoReason):
                 # Veto path: typed silence
