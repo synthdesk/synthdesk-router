@@ -185,6 +185,19 @@ class RouterState:
                             self.symbols[symbol]["z_std"] = float(z_std)
                         except (TypeError, ValueError):
                             pass
+                    # Phase 1 telemetry: per-symbol rolling correlation (typically anchor-relative).
+                    corr = (
+                        metrics.get("rolling_correlation")
+                        or metrics.get("rolling_corr")
+                        or metrics.get("corr")
+                        or metrics.get("correlation")
+                        or metrics.get("corr_to_anchor")
+                    )
+                    if corr is not None:
+                        try:
+                            self.symbols[symbol]["rolling_correlation"] = float(corr)
+                        except (TypeError, ValueError):
+                            pass
                 # Extract range_norm from phase1 primitives (H-019 validated, H-014 consumer)
                 phase1 = payload.get("phase1")
                 if isinstance(phase1, dict):

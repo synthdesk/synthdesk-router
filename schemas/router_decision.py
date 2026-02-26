@@ -4,7 +4,7 @@ router.decision.v1 Schema
 DOCTRINE: VETO_TIMESCALE
 
 Schema hash: computed at module load
-Frozen: 2026-01-23 (v1.0), Amended: 2026-01-23 (v1.1)
+Frozen: 2026-01-23 (v1.0), Amended: 2026-01-24 (v1.2)
 
 INVARIANTS:
 - hold_required=True => system veto, never regime/micro conservatism
@@ -24,23 +24,26 @@ AMENDMENT 1.1 (2026-01-23):
 - Default: "real" (backward compatible with 1.0 payloads)
 - Purpose: Break observability deadlock (emit decisions at v0.1 authority)
 - No impact on allow/block semantics; purely audit metadata
+
+AMENDMENT 1.2 (2026-01-24):
+- Added classification fields: conflict_class, dominant_plane, conflict_score
 """
 
 import hashlib
 import json
 from typing import Any, Dict, List, Optional
 
-ROUTER_DECISION_SCHEMA_VERSION = "1.1"
+ROUTER_DECISION_SCHEMA_VERSION = "1.2"
 
 # Accepted versions (1.0 payloads remain valid; missing decision_authority = "real")
-ROUTER_DECISION_ACCEPTED_VERSIONS = {"1.0", "1.1"}
+ROUTER_DECISION_ACCEPTED_VERSIONS = {"1.0", "1.1", "1.2"}
 
 # Canonical schema definition for router.decision.v1
 # Field ordering is deterministic for hash computation
 ROUTER_DECISION_SCHEMA: Dict[str, Any] = {
-    "version": "1.1",
+    "version": "1.2",
     "frozen_date": "2026-01-23",
-    "amended_date": "2026-01-23",
+    "amended_date": "2026-01-24",
     "doctrine": "VETO_TIMESCALE",
     "fields": {
         # Core decision fields
@@ -199,7 +202,7 @@ ROUTER_DECISION_SCHEMA: Dict[str, Any] = {
             "type": "str",
             "required": True,
             "nullable": False,
-            "values": ["1.0", "1.1"],
+            "values": ["1.0", "1.1", "1.2"],
             "description": "Schema version",
         },
 
@@ -212,6 +215,30 @@ ROUTER_DECISION_SCHEMA: Dict[str, Any] = {
             "default": "real",
             "description": "Authority level at decision time (shadow/weak/real)",
             "added_version": "1.1",
+        },
+
+        # Amendment 1.2: conflict classification (observability only)
+        "conflict_class": {
+            "type": "str",
+            "required": False,
+            "nullable": True,
+            "description": "Classification of surface plane agreement/disagreement",
+            "added_version": "1.2",
+        },
+        "dominant_plane": {
+            "type": "str",
+            "required": False,
+            "nullable": True,
+            "values": ["regime", "micro", None],
+            "description": "Plane that determined outcome, if applicable",
+            "added_version": "1.2",
+        },
+        "conflict_score": {
+            "type": "float",
+            "required": False,
+            "nullable": True,
+            "description": "Conflict intensity 0.0-1.0",
+            "added_version": "1.2",
         },
     },
 
@@ -382,3 +409,40 @@ def is_system_veto(payload: Dict[str, Any]) -> bool:
         payload.get("hold_required") is True and
         payload.get("hold_used") is None
     )
+
+
+def compute_conflict_classification(
+    regime_present: bool,
+    regime_would_block: bool,
+    micro_present: bool,
+    micro_would_block: bool,
+) -> tuple[str, Optional[str], float]:
+    """
+    Deterministic classification for veto-surface plane agreement/disagreement.
+
+    Returns:
+      conflict_class: str
+      dominant_plane: "regime" | "micro" | None
+      conflict_score: 0.0..1.0
+    """
+    # Both present.
+    if regime_present and micro_present:
+        if regime_would_block and micro_would_block:
+            return ("aligned_block", None, 0.0)
+        if (not regime_would_block) and (not micro_would_block):
+            return ("aligned_allow", None, 0.0)
+        if regime_would_block and (not micro_would_block):
+            return ("disagree_regime_block", "regime", 1.0)
+        if micro_would_block and (not regime_would_block):
+            return ("disagree_micro_block", "micro", 1.0)
+        return ("unknown", None, 0.5)
+
+    # Only one present.
+    if regime_present and (not micro_present):
+        return ("regime_only_block" if regime_would_block else "regime_only_allow", "regime", 0.5)
+
+    if micro_present and (not regime_present):
+        return ("micro_only_block" if micro_would_block else "micro_only_allow", "micro", 0.5)
+
+    # None present.
+    return ("no_surfaces", None, 0.5)
