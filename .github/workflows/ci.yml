@@ -39,9 +39,4 @@ jobs:
         run: python -m py_compile router/main.py
 
       - name: Run tests
-        run: |
-          if [ "${{ matrix.python-version }}" = "3.9" ]; then
-            PYTHONPATH=. pytest -q
-          else
-            pytest -q
-          fi
+        run: PYTHONPATH=. pytest -q
