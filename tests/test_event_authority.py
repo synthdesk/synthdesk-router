@@ -17,6 +17,7 @@ from synthdesk_spine.event_types import (
     ROUTER_INTENT_SHADOW,
     ROUTER_HEARTBEAT,
     ROUTER_HEALTH_SUMMARY,
+    ROUTER_PORTFOLIO_V0,
     ROUTER_AUTHORITY_DEMOTION,
     ROUTER_SPEECH_V1,
     COHERENCE_STATE,
@@ -47,6 +48,9 @@ class TestRouterConstantsMatchStrings:
 
     def test_router_health_summary(self):
         assert ROUTER_HEALTH_SUMMARY == "router.health_summary"
+
+    def test_router_portfolio_v0(self):
+        assert ROUTER_PORTFOLIO_V0 == "router.portfolio.v0"
 
     def test_router_authority_demotion(self):
         assert ROUTER_AUTHORITY_DEMOTION == "router.authority_demotion"

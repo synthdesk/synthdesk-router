@@ -40,9 +40,24 @@ from router.constraints import (
     evaluate_constraints_with_strength,
     should_emit_intent,
 )
-from router.portfolio import portfolio_allocate, build_correlation_matrix_from_state
+from router.portfolio import (
+    build_correlation_matrix_from_state,
+    get_correlation_bucket,
+    portfolio_allocate,
+)
 from emission.speech_counters import INVALID_TIMESTAMP, OTHER_INVARIANT_FAIL, SpeechCounters
-from router.emit import emit_intent, emit_shadow_intent, emit_veto, emit_weak_intent, emit_heartbeat, emit_health_summary, emit_decision, set_router_build_sha, set_soak_contract_hash
+from router.emit import (
+    emit_decision,
+    emit_health_summary,
+    emit_heartbeat,
+    emit_intent,
+    emit_portfolio_summary,
+    emit_shadow_intent,
+    emit_veto,
+    emit_weak_intent,
+    set_router_build_sha,
+    set_soak_contract_hash,
+)
 from router.envelope import DEFAULT_HORIZON_MINUTES
 from router.surface_integration import SurfaceCache, evaluate_surface_gate
 from router.surface_policy import PolicyId, decision_to_dict
@@ -116,6 +131,8 @@ CRITICAL_SOURCE_FILES = [
     # Schemas
     "packages/router/schemas/router_intent.py",
     "packages/router/schemas/router_decision.py",
+    # Event type law (constitutional namespace)
+    "packages/router/synthdesk_spine/event_types.py",
 ]
 
 
@@ -260,7 +277,7 @@ def _choose_portfolio_anchor(symbol_allocations: Dict[str, AllocationResult]) ->
 def _apply_portfolio_allocation(
     state_dict: Dict[str, Any],
     per_symbol: Dict[str, tuple[Any, Optional[IntentStrength], Any]],
-) -> None:
+) -> Optional[Dict[str, Any]]:
     """
     Mutate per_symbol in-place: apply correlation penalty + 100% total exposure cap.
 
@@ -269,10 +286,14 @@ def _apply_portfolio_allocation(
     - only size_pct_q changes
     - rationale appends audit tags
     - fail-closed: missing context degrades to no-op
+
+    Returns:
+    - None if portfolio pass did not run
+    - Summary payload for router.portfolio.v0 when pass is applied
     """
     # Feature-gated: default OFF; must be explicitly enabled per host.
     if not _env_flag("ROUTER_PORTFOLIO_ENABLE", "0"):
-        return
+        return None
 
     raw_allocations: Dict[str, AllocationResult] = {}
     for symbol, (result, _strength, _speech) in per_symbol.items():
@@ -284,14 +305,17 @@ def _apply_portfolio_allocation(
             raw_allocations[symbol] = result
 
     if len(raw_allocations) < 2:
-        return
+        return None
 
     anchor_symbol = _choose_portfolio_anchor(raw_allocations)
     symbols = [anchor_symbol] + sorted(s for s in raw_allocations if s != anchor_symbol)
     corr_matrix = build_correlation_matrix_from_state(state_dict, symbols)
     portfolio = portfolio_allocate(raw_allocations, corr_matrix, anchor_symbol=anchor_symbol)
+    total_before_q = sum(alloc.size_pct_q for alloc in raw_allocations.values())
+    summary_symbols: list[Dict[str, Any]] = []
 
-    for symbol, sym_alloc in portfolio.allocations.items():
+    for symbol in sorted(portfolio.allocations.keys()):
+        sym_alloc = portfolio.allocations[symbol]
         if symbol not in raw_allocations:
             continue
 
@@ -330,6 +354,36 @@ def _apply_portfolio_allocation(
 
         _, strength, speech_cycle = per_symbol[symbol]
         per_symbol[symbol] = (updated, strength, speech_cycle)
+
+        if symbol == anchor_symbol:
+            corr_bucket = "anchor"
+            corr_value: Optional[float] = None
+        else:
+            corr_value = float(corr_matrix.get((symbol, anchor_symbol), 0.0))
+            corr_bucket = get_correlation_bucket(corr_value).value
+
+        summary_symbols.append(
+            {
+                "symbol": symbol,
+                "direction": original.direction.value,
+                "orig_size_q": original.size_pct_q,
+                "adjusted_size_q": new_size_q,
+                "corr_bucket": corr_bucket,
+                "corr_value": corr_value,
+                "is_anchor": symbol == anchor_symbol,
+                "penalty_applied": sym_alloc.correlation_penalty > 0.0,
+            }
+        )
+
+    total_after_q = sum(item["adjusted_size_q"] for item in summary_symbols)
+    return {
+        "anchor_symbol": anchor_symbol,
+        "total_before_q": total_before_q,
+        "total_after_q": total_after_q,
+        "exposure_cap_applied": portfolio.exposure_cap_applied,
+        "penalties_applied": portfolio.correlation_penalties_applied,
+        "symbols": summary_symbols,
+    }
 
 
 class TickWatcher:
@@ -777,7 +831,14 @@ def run_runtime(
             per_symbol[symbol] = (result, intent_strength, speech_cycle)
 
         # Phase 2: portfolio-level adjustment (correlation penalty + 100% cap).
-        _apply_portfolio_allocation(state_dict, per_symbol)
+        portfolio_summary = _apply_portfolio_allocation(state_dict, per_symbol)
+        if portfolio_summary is not None:
+            emit_portfolio_summary(
+                spine_path=spine_path,
+                summary=portfolio_summary,
+                source_event_id=event_id,
+                source_ts=timestamp,
+            )
 
         # Phase 3: emit according to authority + surface gates.
         for symbol in symbols_order:
@@ -1092,7 +1153,14 @@ def run_replay(
             result, intent_strength = evaluate_constraints_with_strength(state_dict, symbol)
             per_symbol[symbol] = (result, intent_strength, None)
 
-        _apply_portfolio_allocation(state_dict, per_symbol)
+        portfolio_summary = _apply_portfolio_allocation(state_dict, per_symbol)
+        if portfolio_summary is not None:
+            emit_portfolio_summary(
+                spine_path=output_spine,
+                summary=portfolio_summary,
+                source_event_id=event_id,
+                source_ts=timestamp,
+            )
 
         for symbol in symbols_order:
             entry = per_symbol.get(symbol)

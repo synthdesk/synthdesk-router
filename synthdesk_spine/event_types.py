@@ -29,6 +29,9 @@ ROUTER_INTENT_SHADOW = "router.intent_shadow"
 ROUTER_VETO = "router.veto"
 ROUTER_HEARTBEAT = "router.heartbeat"
 ROUTER_HEALTH_SUMMARY = "router.health_summary"
+# Portfolio summary event (cross-asset sizing observability)
+# Added 2026-02-26
+ROUTER_PORTFOLIO_V0 = "router.portfolio.v0"
 ROUTER_AUTHORITY_DEMOTION = "router.authority_demotion"
 ROUTER_SPEECH_V1 = "router.speech.v1"
 # Decision event: explains surface gate evaluation (DOCTRINE: VETO_TIMESCALE)
