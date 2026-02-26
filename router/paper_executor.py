@@ -172,12 +172,19 @@ def check_caps(
         resolved_rank = regime_rank if regime_rank is not None else 1
         rank_source = "spectral" if regime_rank is not None else "missing_failclosed"
     else:
-        # Fallback to baseline if envelope unavailable
-        max_gross = BASE_MAX_GROSS_EXPOSURE
-        max_notional = BASE_MAX_NOTIONAL_PER_TRADE
-        max_positions = BASE_MAX_CONCURRENT_POSITIONS
-        resolved_rank = None
-        rank_source = "envelope_unavailable"
+        # Fallback path when envelope module is unavailable:
+        # preserve fail-closed rank semantics instead of silently reverting to baseline.
+        resolved_rank = regime_rank if regime_rank in (1, 2) else 1
+        if resolved_rank == 1:
+            max_gross = 0.40 * PAPER_CAPITAL
+            max_notional = 0.40 * BASE_MAX_NOTIONAL_PER_TRADE
+            max_positions = max(1, BASE_MAX_CONCURRENT_POSITIONS // 2)
+            rank_source = "missing_failclosed" if regime_rank is None else "envelope_unavailable_failclosed"
+        else:
+            max_gross = BASE_MAX_GROSS_EXPOSURE
+            max_notional = BASE_MAX_NOTIONAL_PER_TRADE
+            max_positions = BASE_MAX_CONCURRENT_POSITIONS
+            rank_source = "envelope_unavailable"
 
     # Populate audit dict if provided
     if envelope_audit is not None:
