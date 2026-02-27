@@ -2,7 +2,7 @@
 # Router v0.1 golden corpus gate
 # Enforces frozen semantics via byte-identical replay
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CASES_DIR="$SCRIPT_DIR/cases"
@@ -47,19 +47,19 @@ for case_file in $CASES; do
     actual_output=$(mktemp)
 
     cd "$ROUTER_DIR"
-    PYTHONPATH="$ROUTER_DIR" python3 -m router.main --replay "$case_file" "$actual_output" 2>/dev/null
+    PYTHONPATH="$ROUTER_DIR" python3 -m router.main --replay "$case_file" "$actual_output"
 
     # Compare byte-for-byte
     if diff -q "$expected_file" "$actual_output" >/dev/null 2>&1; then
         echo -e "${GREEN}✓ $case_name${NC}"
-        ((PASSED++))
+        ((++PASSED))
     else
         echo -e "${RED}✗ $case_name${NC}"
         echo "  Expected: $expected_file"
         echo "  Actual:   $actual_output"
         echo "  Diff:"
-        diff "$expected_file" "$actual_output" | head -20 | sed 's/^/    /'
-        ((FAILED++))
+        diff "$expected_file" "$actual_output" | head -20 | sed 's/^/    /' || true
+        ((++FAILED))
     fi
 
     rm -f "$actual_output"

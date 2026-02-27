@@ -2,7 +2,7 @@
 # Router v0.1 determinism gate
 # Ensures byte-identical replay across runs
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CASES_DIR="$SCRIPT_DIR/cases"
@@ -40,20 +40,20 @@ for case_file in $CASES; do
     output2=$(mktemp)
 
     cd "$ROUTER_DIR"
-    PYTHONPATH="$ROUTER_DIR" python3 -m router.main --replay "$case_file" "$output1" 2>/dev/null
-    PYTHONPATH="$ROUTER_DIR" python3 -m router.main --replay "$case_file" "$output2" 2>/dev/null
+    PYTHONPATH="$ROUTER_DIR" python3 -m router.main --replay "$case_file" "$output1"
+    PYTHONPATH="$ROUTER_DIR" python3 -m router.main --replay "$case_file" "$output2"
 
     # Compare byte-for-byte
     if diff -q "$output1" "$output2" >/dev/null 2>&1; then
         echo -e "${GREEN}✓ $case_name (deterministic)${NC}"
-        ((PASSED++))
+        ((++PASSED))
     else
         echo -e "${RED}✗ $case_name (NON-DETERMINISTIC)${NC}"
         echo "  Run 1: $output1"
         echo "  Run 2: $output2"
         echo "  Diff:"
-        diff "$output1" "$output2" | head -20 | sed 's/^/    /'
-        ((FAILED++))
+        diff "$output1" "$output2" | head -20 | sed 's/^/    /' || true
+        ((++FAILED))
     fi
 
     rm -f "$output1" "$output2"
