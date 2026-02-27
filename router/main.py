@@ -152,6 +152,9 @@ def compute_build_metadata(repo_root: Path) -> Dict[str, Any]:
 
     for rel_path in sorted(CRITICAL_SOURCE_FILES):
         file_path = repo_root / rel_path
+        if not file_path.exists() and rel_path.startswith("packages/router/"):
+            # Support standalone synthdesk-router checkout layout.
+            file_path = repo_root / rel_path[len("packages/router/"):]
         if file_path.exists():
             file_hash = get_file_sha256(file_path)
             file_hashes[rel_path] = file_hash
@@ -170,6 +173,8 @@ def compute_build_metadata(repo_root: Path) -> Dict[str, Any]:
 def get_router_commit(repo_root: Path) -> str:
     """Get router package git commit hash."""
     router_pkg = repo_root / "packages" / "router"
+    if not router_pkg.exists() and (repo_root / ".git").exists():
+        router_pkg = repo_root
     try:
         result = subprocess.run(
             ["git", "-C", str(router_pkg), "rev-parse", "HEAD"],
