@@ -8,7 +8,7 @@ on:
 
 jobs:
   call:
-    uses: synthdesk/synthdesk-tools/.github/workflows/golden-gates-reusable.yml@ci-gates-v1.0.2
+    uses: synthdesk/synthdesk-tools/.github/workflows/golden-gates-reusable.yml@2af86d84aade1cc64db032a25626226649bee6de
     with:
       repo_role: router
       python_router: "3.11"
